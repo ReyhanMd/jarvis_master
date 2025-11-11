@@ -1,0 +1,28 @@
+# Shail Core Dependencies
+# Install these in your virtual environment: pip install -r requirements.txt
+
+# Core Framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# LLM & Agents
+langchain>=0.3.0
+langchain-google-genai>=1.0.0
+langchain-core>=0.3.0
+
+# Task Queue
+redis>=5.0.0
+
+# Database
+# (SQLite is built-in, no package needed)
+
+# Utilities
+requests>=2.31.0
+
+# Desktop Control
+pynput>=1.7.6  # For mouse/keyboard control
+pyautogui>=0.9.54  # Alternative mouse/keyboard control
+pyobjc>=10.0  # macOS AppKit integration (for window management)
+

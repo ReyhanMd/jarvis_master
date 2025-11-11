@@ -1,0 +1,53 @@
+# Environment variables
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv
+venv/
+env/
+ENV/
+jarvis-env/
+
+# System files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+api.log
+ui.log
+worker.log
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+*.rdb
+dump.rdb
+shail_memory.sqlite3
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Node modules
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Redis dump
+dump.rdb
