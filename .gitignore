@@ -51,3 +51,21 @@ build/
 
 # Redis dump
 dump.rdb
+
+# Virtual environments (contains large Python packages)
+services_env/
+
+# Xcode build artifacts
+native/mac/*/DerivedData/
+*.xcuserdata
+*.xcworkspace
+*.xcodeproj/xcuserdata/
+
+# Large binary files (Python extensions)
+*.so
+*.dylib
+*.dll
+
+# Large database/index files
+*.mdb
+*.xcindex
