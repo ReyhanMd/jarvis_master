@@ -1,0 +1,21 @@
+/* WorkflowGraph styling */
+
+.workflow-graph {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-origin: center;
+}
+
+.workflow-graph-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.workflow-node {
+  transition: all 0.2s;
+}
+
+.workflow-node:hover {
+  transform: scale(1.1);
+}

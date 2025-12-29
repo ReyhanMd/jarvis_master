@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import os
 import sys
 import importlib.util
+import logging
 
 # Ensure project root is on sys.path for `shail` package imports
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -26,11 +27,15 @@ if os.path.exists(shail_path):
         pass
 
 from shail.core.router import ShailCoreRouter
-from shail.core.types import TaskRequest, TaskResult, TaskStatus
+from shail.core.types import TaskRequest, TaskResult, TaskStatus, ChatRequest, ChatResponse
 from shail.safety.permission_manager import PermissionManager
 from shail.safety.exceptions import PermissionDenied
 from shail.utils.queue import TaskQueue
 from shail.memory.store import create_task, get_task, update_task_status, get_all_tasks
+from apps.shail.settings import get_settings
+from shail.integrations.register_all import register_all_tools
+from shail.integrations.mcp.provider import get_provider
+from apps.shail.websocket_server import websocket_endpoint, websocket_manager
 import uuid
 
 
@@ -62,11 +67,32 @@ app.add_middleware(
 )
 
 router = ShailCoreRouter()
+logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+def bootstrap_mcp():
+    """Register all tools with MCP on service startup."""
+    try:
+        register_all_tools(get_provider())
+        logger.info("MCP registration completed on startup")
+    except Exception as exc:
+        logger.warning("MCP registration failed: %s", exc)
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse()
+
+
+@app.websocket("/ws/brain")
+async def websocket_brain(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time LangGraph state synchronization.
+    
+    Clients connect to receive state updates as the planner executes tasks.
+    """
+    await websocket_endpoint(websocket)
 
 
 @app.post("/tasks", response_model=TaskQueuedResponse, status_code=202)
@@ -95,6 +121,40 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
             status="queued",
             message=f"Task {task_id} queued for processing"
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tasks/all")
+def get_all_tasks_endpoint(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    """
+    Get all tasks from the database.
+    
+    Args:
+        limit: Maximum number of tasks to return (default: 100)
+        offset: Number of tasks to skip for pagination (default: 0)
+        
+    Returns:
+        List of task dictionaries with their current status
+    """
+    try:
+        tasks = get_all_tasks(limit=limit, offset=offset)
+        
+        # Enrich tasks with permission requests if awaiting approval
+        enriched_tasks = []
+        for task in tasks:
+            task_id = task["task_id"]
+            if task["status"] == "awaiting_approval":
+                permission_req = PermissionManager.get_pending(task_id)
+                task["permission_request"] = permission_req.dict() if permission_req else None
+            
+            # Extract text from request for display
+            request_text = task.get("request", {}).get("text", "")
+            task["request_text"] = request_text
+            
+            enriched_tasks.append(task)
+        
+        return enriched_tasks
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -213,38 +273,117 @@ def deny_task(task_id: str) -> ApprovalResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/tasks/all")
-def get_all_tasks_endpoint(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+@app.post("/permissions/bulk-approve")
+async def bulk_approve_permissions(categories: List[str]):
     """
-    Get all tasks from the database.
+    Approve multiple permission categories at once.
     
-    Args:
-        limit: Maximum number of tasks to return (default: 100)
-        offset: Number of tasks to skip for pagination (default: 0)
-        
-    Returns:
-        List of task dictionaries with their current status
+    This allows users to approve common operations (desktop_control, window_management, etc.)
+    at startup, reducing the need for individual permission requests during task execution.
     """
     try:
-        tasks = get_all_tasks(limit=limit, offset=offset)
+        from shail.safety.bulk_permissions import approve_category
         
-        # Enrich tasks with permission requests if awaiting approval
-        enriched_tasks = []
-        for task in tasks:
-            task_id = task["task_id"]
-            if task["status"] == "awaiting_approval":
-                permission_req = PermissionManager.get_pending(task_id)
-                task["permission_request"] = permission_req.dict() if permission_req else None
-            
-            # Extract text from request for display
-            request_text = task.get("request", {}).get("text", "")
-            task["request_text"] = request_text
-            
-            enriched_tasks.append(task)
+        approved = []
+        failed = []
         
-        return enriched_tasks
+        for category in categories:
+            if approve_category(category):
+                approved.append(category)
+            else:
+                failed.append(category)
+        
+        return {
+            "approved": approved,
+            "failed": failed,
+            "message": f"Approved {len(approved)} categories"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/permissions/categories")
+async def get_permission_categories():
+    """
+    Get list of permission categories available for bulk approval.
+    
+    Returns a dictionary mapping category names to their descriptions.
+    """
+    try:
+        from shail.safety.bulk_permissions import get_permission_summary
+        return get_permission_summary()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest) -> ChatResponse:
+    """
+    Direct chat endpoint - immediate LLM response without task queue.
+    
+    This endpoint provides synchronous, real-time conversation with the LLM.
+    Perfect for quick questions and interactive chat.
+    
+    Supports:
+    - Text-only messages
+    - Image attachments (multimodal input)
+    
+    Returns response immediately (no async task queue).
+    """
+    try:
+        settings = get_settings()
+        
+        if not settings.gemini_api_key:
+            raise HTTPException(
+                status_code=500, 
+                detail="GEMINI_API_KEY not configured. Please set it in .env file or environment variables."
+            )
+        
+        # Import LangChain Gemini client
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from langchain_core.messages import HumanMessage
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="langchain_google_genai not installed. Install with: pip install langchain-google-genai"
+            )
+        
+        # Initialize LLM client
+        llm = ChatGoogleGenerativeAI(
+            model=settings.gemini_model,
+            google_api_key=settings.gemini_api_key,
+            temperature=0.7
+        )
+        
+        # Build message content
+        content = [{"type": "text", "text": request.text}]
+        
+        # Add images if provided (multimodal support)
+        if request.attachments:
+            for att in request.attachments:
+                if att.mime_type and att.mime_type.startswith("image/"):
+                    if att.content_b64:
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{att.mime_type};base64,{att.content_b64}"
+                            }
+                        })
+        
+        # Create message and invoke LLM
+        message = HumanMessage(content=content)
+        response = await llm.ainvoke([message])
+        
+        return ChatResponse(
+            text=response.content,
+            model=settings.gemini_model
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import os
+from typing import List, Optional
 from pathlib import Path
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -25,6 +26,13 @@ class Settings(BaseModel):
     # API Keys / Models
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     gemini_model: str = Field(default=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+    rag_embedding_model: str = Field(default=os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-004"))
+    rag_embedding_dim: int = Field(default=int(os.getenv("RAG_EMBEDDING_DIM", "768")))
+    
+    # Kimi-K2 Master LLM
+    kimi_k2_api_key: str = Field(default_factory=lambda: os.getenv("KIMI_K2_API_KEY", ""))
+    kimi_k2_model: str = Field(default=os.getenv("KIMI_K2_MODEL", "moonshot-v1-8k"))
+    use_kimi_k2_master: bool = Field(default=os.getenv("USE_KIMI_K2_MASTER", "false").lower() == "true")
 
     # Paths
     workspace_root: str = Field(default=os.getenv("SHAIL_WORKSPACE_ROOT", os.getcwd()))
@@ -32,13 +40,19 @@ class Settings(BaseModel):
 
     # Memory / DB
     sqlite_path: str = Field(default=os.getenv("SHAIL_SQLITE", os.path.join(os.getcwd(), "shail_memory.sqlite3")))
+    rag_vector_store: str = Field(default=os.getenv("RAG_VECTOR_STORE", "pgvector"))  # pgvector|chroma
+    rag_pg_dsn: str = Field(default=os.getenv("RAG_PG_DSN", "postgresql://postgres:postgres@localhost:5432/shail_rag"))
+    rag_chroma_path: str = Field(default=os.getenv("RAG_CHROMA_PATH", os.path.join(os.getcwd(), "rag_chroma")))
+    rag_default_top_k: int = Field(default=int(os.getenv("RAG_TOP_K", "5")))
+    rag_chunk_size: int = Field(default=int(os.getenv("RAG_CHUNK_SIZE", "800")))
+    rag_chunk_overlap: int = Field(default=int(os.getenv("RAG_CHUNK_OVERLAP", "120")))
 
     # Redis / Queue
     redis_url: str = Field(default=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
     task_queue_name: str = Field(default=os.getenv("SHAIL_TASK_QUEUE", "shail_tasks"))
 
 
-_settings: Settings | None = None
+_settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:

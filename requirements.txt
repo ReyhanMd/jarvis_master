@@ -20,6 +20,9 @@ redis>=5.0.0
 
 # Utilities
 requests>=2.31.0
+fastmcp>=0.1.0
+psycopg2-binary>=2.9.9
+chromadb>=0.5.5
 
 # Desktop Control
 pynput>=1.7.6  # For mouse/keyboard control

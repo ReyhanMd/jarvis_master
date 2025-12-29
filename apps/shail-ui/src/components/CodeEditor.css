@@ -1,0 +1,105 @@
+/* CodeEditor - Code editor styling */
+
+.code-editor {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 14px;
+}
+
+.code-editor-layout {
+  display: flex;
+  height: 100%;
+}
+
+.code-editor-sidebar {
+  width: 250px;
+  border-right: 1px solid #3e3e3e;
+  background: #252526;
+  overflow-y: auto;
+}
+
+.code-editor-tree {
+  padding: 8px;
+}
+
+.code-editor-tree-header {
+  font-weight: 600;
+  padding: 8px;
+  color: #cccccc;
+  border-bottom: 1px solid #3e3e3e;
+  margin-bottom: 8px;
+}
+
+.code-editor-tree-content {
+  padding-left: 8px;
+}
+
+.code-editor-tree-item {
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.code-editor-tree-item:hover {
+  background: #2a2d2e;
+}
+
+.code-editor-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.code-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #2d2d2d;
+  border-bottom: 1px solid #3e3e3e;
+}
+
+.code-editor-file-path {
+  color: #cccccc;
+  font-size: 13px;
+}
+
+.code-editor-readonly-badge {
+  background: #007acc;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.code-editor-content {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+}
+
+.code-editor-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.code-editor-textarea {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: inherit;
+  resize: none;
+  outline: none;
+  padding: 0;
+}

@@ -1,6 +1,117 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from shail.core.types import TaskRequest, TaskResult, TaskStatus
 from shail.safety.exceptions import PermissionRequired
+
+logger = None
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except:
+    pass
+
+
+class LangGraphExecutor:
+    """
+    LangGraph-based executor for stateful workflows and multi-agent orchestration.
+    
+    This replaces SimpleGraphExecutor with LangGraph for:
+    - Stateful workflows
+    - Multi-agent orchestration
+    - LLM-to-LLM communication
+    """
+    
+    def __init__(self, agent, task_id: str = None):
+        """
+        Initialize LangGraph executor.
+        
+        Args:
+            agent: Agent to execute
+            task_id: Optional task ID
+        """
+        self.agent = agent
+        self.task_id = task_id
+        self.use_langgraph = False
+        
+        # Try to import LangGraph
+        try:
+            from langgraph.graph import StateGraph, END
+            self.use_langgraph = True
+            self.StateGraph = StateGraph
+            self.END = END
+            if logger:
+                logger.info("LangGraph available - using LangGraph executor")
+        except ImportError:
+            if logger:
+                logger.warning("LangGraph not available - falling back to SimpleGraphExecutor")
+    
+    def build_graph(self) -> Optional[Any]:
+        """
+        Build LangGraph workflow graph.
+        
+        Returns:
+            LangGraph StateGraph or None if LangGraph not available
+        """
+        if not self.use_langgraph:
+            return None
+        
+        # Build stateful workflow graph
+        # In full implementation, would create nodes for:
+        # - Master LLM (Kimi-K2)
+        # - Worker LLMs (Gemini, ChatGPT)
+        # - Tool execution nodes
+        # - Decision nodes
+        
+        workflow = self.StateGraph(Dict[str, Any])
+        
+        # Add nodes (stub implementation)
+        # workflow.add_node("master_llm", self._master_llm_node)
+        # workflow.add_node("worker_llm", self._worker_llm_node)
+        # workflow.add_node("tool_execution", self._tool_execution_node)
+        
+        # Set entry point
+        # workflow.set_entry_point("master_llm")
+        
+        # Add edges
+        # workflow.add_edge("master_llm", "worker_llm")
+        # workflow.add_edge("worker_llm", self.END)
+        
+        # Compile graph
+        # app = workflow.compile()
+        # return app
+        
+        # For now, return None to use SimpleGraphExecutor
+        return None
+    
+    def run(self, req: TaskRequest) -> TaskResult:
+        """
+        Execute using LangGraph if available, otherwise fall back to SimpleGraphExecutor.
+        
+        Args:
+            req: Task request
+            
+        Returns:
+            Task result
+        """
+        graph = self.build_graph()
+        
+        if graph:
+            # Use LangGraph execution
+            # result = graph.invoke({"request": req.text, "task_id": self.task_id})
+            # return self._convert_langgraph_result(result)
+            pass
+        
+        # Fall back to SimpleGraphExecutor
+        return SimpleGraphExecutor(self.agent, self.task_id).run(req)
+    
+    def _convert_langgraph_result(self, result: Dict[str, Any]) -> TaskResult:
+        """Convert LangGraph result to TaskResult."""
+        return TaskResult(
+            status=TaskStatus.COMPLETED,
+            summary=result.get("summary", ""),
+            agent=self.agent.name,
+            artifacts=result.get("artifacts", []),
+            task_id=self.task_id,
+        )
 
 
 class SimpleGraphExecutor:
@@ -25,7 +136,13 @@ class SimpleGraphExecutor:
         
         Handles PermissionRequired exceptions by returning AWAITING_APPROVAL status.
         """
+        # Set task_id in thread-local context so tools can access it
+        from shail.safety.context import set_current_task_id, clear_current_task_id
+        
         try:
+            if self.task_id:
+                set_current_task_id(self.task_id)
+            
             # Plan step (can be used for logging/analysis)
             plan = self.agent.plan(req.text)
             
@@ -146,5 +263,8 @@ class SimpleGraphExecutor:
                 artifacts=[],
                 task_id=self.task_id
             )
+        finally:
+            # Always clear context when done
+            clear_current_task_id()
 
 

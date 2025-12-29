@@ -1,0 +1,187 @@
+/* QuickPopup - Glassmorphic styling */
+
+.quick-popup {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+  animation: slideInUp 0.3s ease-out;
+}
+
+@keyframes slideInUp {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.quick-popup-content {
+  background: rgba(59, 130, 246, 0.15); /* Translucent blue */
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 16px;
+  padding: 20px;
+  min-width: 320px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  position: relative;
+}
+
+/* Status Ring Indicator */
+.status-ring {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+.status-ring-inner {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+/* Idle state - dim */
+.status-ring-idle {
+  background: rgba(255, 255, 255, 0.2);
+  opacity: 0.5;
+}
+
+.status-ring-idle .status-ring-inner {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Listening state - glow */
+.status-ring-listening {
+  background: rgba(59, 130, 246, 0.3);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-ring-listening .status-ring-inner {
+  background: rgba(59, 130, 246, 0.5);
+}
+
+/* Seeing + Listening state - filled blue circle */
+.status-ring-seeing {
+  background: rgba(59, 130, 246, 0.8);
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.8);
+}
+
+.status-ring-seeing .status-ring-inner {
+  background: rgba(59, 130, 246, 1);
+}
+
+/* Thinking state - pulsing */
+.status-ring-thinking {
+  background: rgba(59, 130, 246, 0.6);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.8);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.status-ring-thinking .status-ring-inner {
+  background: rgba(59, 130, 246, 0.8);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 0.7;
+  }
+}
+
+.quick-popup-greeting {
+  font-size: 18px;
+  font-weight: 600;
+  color: white;
+  margin-bottom: 8px;
+}
+
+.quick-popup-status {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-bottom: 16px;
+}
+
+.quick-popup-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.quick-popup-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: white;
+  font-size: 14px;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.quick-popup-input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.quick-popup-input:focus {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.quick-popup-mic {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 10px;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.quick-popup-mic:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.05);
+}
+
+.quick-popup-mic:active {
+  transform: scale(0.95);
+}
+
+.quick-popup-add {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 10px;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.quick-popup-add:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.05);
+}
+
+.quick-popup-add:active {
+  transform: scale(0.95);
+}

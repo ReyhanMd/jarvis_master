@@ -13,6 +13,12 @@ from shail.tools.desktop import (
     get_mouse_position, get_screen_size, focus_window, get_window_position, list_open_windows
 )
 from shail.tools.os import open_app, close_app
+from shail.tools.monitor import (
+    get_active_window,
+    get_running_apps,
+    get_screen_info,
+    wait_for_window
+)
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import create_react_agent, AgentExecutor
 from apps.shail.settings import get_settings
@@ -58,6 +64,11 @@ class FriendAgent(AbstractAgent):
             # App control
             open_app,
             close_app,
+            # Real-time monitoring
+            get_active_window,
+            get_running_apps,
+            get_screen_info,
+            wait_for_window,
         ]
         
         # Explicit ReAct prompt that FORBIDS the "one statement at a time" error
@@ -115,8 +126,10 @@ Thought:{agent_scratchpad}""")
 
     def act(self, text: str) -> Tuple[str, List[Artifact]]:
         """Execute the request using LangChain agent with desktop tools."""
+        print(f"[DEBUG FriendAgent.act] Starting execution: {text[:50]}")
         try:
             result = self.executor.invoke({"input": text})
+            print(f"[DEBUG FriendAgent.act] Executor result: {result}")
             output = result.get("output", "Task completed")
             
             # Extract artifacts from tool calls
@@ -125,5 +138,6 @@ Thought:{agent_scratchpad}""")
             
             return output, artifacts
         except Exception as e:
+            print(f"[DEBUG FriendAgent.act] Exception caught: {type(e).__name__}: {e}")
             error_msg = f"FriendAgent execution error: {str(e)}"
             return error_msg, []

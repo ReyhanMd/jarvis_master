@@ -1,0 +1,23 @@
+{
+  "DVTSourceControlWorkspaceBlueprintPrimaryRemoteRepositoryKey" : "35950DED8D9C4A64FD5D7AA0B45F4401171978E9",
+  "DVTSourceControlWorkspaceBlueprintWorkingCopyRepositoryLocationsKey" : {
+
+  },
+  "DVTSourceControlWorkspaceBlueprintWorkingCopyStatesKey" : {
+    "35950DED8D9C4A64FD5D7AA0B45F4401171978E9" : 0
+  },
+  "DVTSourceControlWorkspaceBlueprintIdentifierKey" : "AB6174DC-4AF8-4F58-BBD5-44F601021110",
+  "DVTSourceControlWorkspaceBlueprintWorkingCopyPathsKey" : {
+    "35950DED8D9C4A64FD5D7AA0B45F4401171978E9" : "jarvis_master\/"
+  },
+  "DVTSourceControlWorkspaceBlueprintNameKey" : "AccessibilityBridge",
+  "DVTSourceControlWorkspaceBlueprintVersion" : 204,
+  "DVTSourceControlWorkspaceBlueprintRelativePathToProjectKey" : "native\/mac\/AccessibilityBridge\/AccessibilityBridge.xcodeproj",
+  "DVTSourceControlWorkspaceBlueprintRemoteRepositoriesKey" : [
+    {
+      "DVTSourceControlWorkspaceBlueprintRemoteRepositoryURLKey" : "https:\/\/github.com\/ReyhanMd\/shail.git",
+      "DVTSourceControlWorkspaceBlueprintRemoteRepositorySystemKey" : "com.apple.dt.Xcode.sourcecontrol.Git",
+      "DVTSourceControlWorkspaceBlueprintRemoteRepositoryIdentifierKey" : "35950DED8D9C4A64FD5D7AA0B45F4401171978E9"
+    }
+  ]
+}
