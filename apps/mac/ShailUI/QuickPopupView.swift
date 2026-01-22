@@ -2,11 +2,16 @@ import SwiftUI
 
 struct QuickPopupView: View {
     @EnvironmentObject var coordinator: ViewCoordinator
+    @StateObject private var wsClient = BackendWebSocketClient()
+    @StateObject private var desktopManager = DesktopManager()
     @State private var query: String = ""
     @State private var isListening: Bool = false
     @State private var isLoading: Bool = false
     @State private var errorMessage: String?
     @State private var backendAvailable: Bool = false
+    @State private var nativeHealth: NativeHealthStatus?
+    @State private var pendingPermission: PermissionRequest?
+    @State private var showSettings: Bool = false
     
     var body: some View {
         VStack(spacing: 16) {
@@ -44,6 +49,30 @@ struct QuickPopupView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Color.orange.opacity(0.1))
+                .cornerRadius(8)
+            }
+
+            if let health = nativeHealth {
+                let captureOk = health.capture == "connected"
+                let accessibilityOk = health.accessibility == "connected"
+                let groundingOk = captureOk && accessibilityOk
+                HStack(spacing: 6) {
+                    Image(systemName: groundingOk ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(groundingOk ? .green : .orange)
+                        .font(.caption)
+                    Text(groundingOk ? "Grounding Active" : "Grounding Inactive")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Capture: \(health.capture)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text("AX: \(health.accessibility)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.gray.opacity(0.1))
                 .cornerRadius(8)
             }
             
@@ -97,6 +126,13 @@ struct QuickPopupView: View {
                         .foregroundColor(isListening ? .red : .gray)
                 }
                 .buttonStyle(PlainButtonStyle())
+
+                Button(action: {
+                    showSettings = true
+                }) {
+                    Image(systemName: "gearshape.fill")
+                }
+                .buttonStyle(PlainButtonStyle())
             }
             .padding()
             .background(Color.white.opacity(0.8))
@@ -112,6 +148,14 @@ struct QuickPopupView: View {
         .cornerRadius(20)
         .onAppear {
             checkBackendHealth()
+            checkNativeHealth()
+            checkPermissionsAwaiting()
+            wsClient.connect()
+        }
+        .onChange(of: wsClient.permissionRequest) { newRequest in
+            if let request = newRequest {
+                pendingPermission = request
+            }
         }
         // Gesture for 3-finger swipe
         .gesture(
@@ -122,6 +166,26 @@ struct QuickPopupView: View {
                     }
                 }
         )
+        .sheet(item: $pendingPermission) { request in
+            PermissionRequestView(
+                request: request,
+                onApprove: {
+                    Task {
+                        try? await PermissionService.shared.approve(taskId: request.taskId)
+                        pendingPermission = nil
+                    }
+                },
+                onDeny: {
+                    Task {
+                        try? await PermissionService.shared.deny(taskId: request.taskId)
+                        pendingPermission = nil
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
     }
     
     private func submitQuery() {
@@ -132,12 +196,22 @@ struct QuickPopupView: View {
         
         Task {
             do {
+                // Submit as task to include desktop_id for testing
+                let desktopId = desktopManager.activeDesktop
+                let taskResponse = try await TaskService.shared.submitTask(
+                    text: query,
+                    mode: "auto",
+                    desktopId: desktopId
+                )
+                
+                // Also get quick chat response for immediate feedback
                 let response = try await ChatService.shared.sendMessage(query)
                 
                 // Store response in coordinator for ChatOverlayView
                 await MainActor.run {
                     isLoading = false
                     coordinator.lastChatResponse = response.text
+                    coordinator.activeTaskId = taskResponse.task_id
                     coordinator.showChat()
                 }
             } catch {
@@ -149,11 +223,68 @@ struct QuickPopupView: View {
         }
     }
     
+    /// Submit a task (for complex operations that need planning)
+    private func submitTask(_ text: String) {
+        Task {
+            do {
+                // Get current desktop ID
+                let desktopId = desktopManager.activeDesktop
+                
+                // Submit task with desktop context
+                let response = try await TaskService.shared.submitTask(
+                    text: text,
+                    mode: "auto",
+                    desktopId: desktopId
+                )
+                
+                await MainActor.run {
+                    coordinator.activeTaskId = response.task_id
+                    // Show task result view or notification
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "Failed to submit task: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
     private func checkBackendHealth() {
         Task {
             let available = await ChatService.shared.checkHealth()
             await MainActor.run {
                 backendAvailable = available
+            }
+        }
+    }
+
+    private func checkNativeHealth() {
+        Task {
+            guard let url = URL(string: "http://localhost:8000/health/native") else { return }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    return
+                }
+                let decoded = try JSONDecoder().decode(NativeHealthStatus.self, from: data)
+                await MainActor.run {
+                    nativeHealth = decoded
+                }
+            } catch {
+                // ignore
+            }
+        }
+    }
+
+    private func checkPermissionsAwaiting() {
+        Task {
+            do {
+                let list = try await PermissionService.shared.fetchAwaitingApproval()
+                await MainActor.run {
+                    pendingPermission = list.first
+                }
+            } catch {
+                // ignore
             }
         }
     }

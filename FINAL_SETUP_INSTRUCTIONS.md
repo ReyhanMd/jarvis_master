@@ -129,7 +129,7 @@ macOS shows: "CaptureService would like to record your screen"
 
 ```bash
 # Build CaptureService
-cd /Users/reyhan/jarvis_master/native/mac/CaptureService
+cd /Users/reyhan/shail_master/native/mac/CaptureService
 xcodebuild -project CaptureService.xcodeproj -scheme CaptureService -configuration Debug
 
 # Run it

@@ -141,8 +141,8 @@ echo ""
 # Find executables with proper path resolution
 echo "🔍 Finding executables..."
 
-CAPTURE_EXEC=$(find_executable "CaptureService" "/Users/reyhan/jarvis_master/native/mac/CaptureService/DerivedData/CaptureService/Build/Products/Debug/CaptureService")
-ACCESS_EXEC=$(find_executable "AccessibilityBridge" "/Users/reyhan/jarvis_master/native/mac/AccessibilityBridge/DerivedData/AccessibilityBridge/Build/Products/Debug/AccessibilityBridge")
+CAPTURE_EXEC=$(find_executable "CaptureService" "/Users/reyhan/shail_master/native/mac/CaptureService/DerivedData/CaptureService/Build/Products/Debug/CaptureService")
+ACCESS_EXEC=$(find_executable "AccessibilityBridge" "/Users/reyhan/shail_master/native/mac/AccessibilityBridge/DerivedData/AccessibilityBridge/Build/Products/Debug/AccessibilityBridge")
 
 # Verify CaptureService
 if [ -z "$CAPTURE_EXEC" ] || [ ! -f "$CAPTURE_EXEC" ]; then
@@ -179,7 +179,7 @@ echo ""
 CAPTURE_SCRIPT=$(mktemp /tmp/capture_service_XXXXXX.sh)
 cat > "$CAPTURE_SCRIPT" << EOF
 #!/bin/bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 echo "🎥 CaptureService"
 echo "=================="
 echo "Path: $CAPTURE_EXEC"
@@ -192,7 +192,7 @@ chmod +x "$CAPTURE_SCRIPT"
 ACCESS_SCRIPT=$(mktemp /tmp/accessibility_bridge_XXXXXX.sh)
 cat > "$ACCESS_SCRIPT" << EOF
 #!/bin/bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 echo "♿ AccessibilityBridge"
 echo "======================"
 echo "Path: $ACCESS_EXEC"

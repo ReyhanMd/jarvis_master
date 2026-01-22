@@ -6,6 +6,7 @@ allowing tools to check if they're in an approved execution context.
 """
 
 import threading
+from typing import Optional
 
 _context = threading.local()
 
@@ -15,7 +16,7 @@ def set_current_task_id(task_id: str) -> None:
     _context.task_id = task_id
 
 
-def get_current_task_id() -> str | None:
+def get_current_task_id() -> Optional[str]:
     """Get the current task ID for this thread, or None if not set."""
     return getattr(_context, 'task_id', None)
 

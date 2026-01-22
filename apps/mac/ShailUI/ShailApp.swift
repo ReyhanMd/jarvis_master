@@ -29,7 +29,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Create window manager
         windowManager = WindowManager()
-        windowManager?.createPanel(coordinator: coordinator)
+        windowManager?.createPanel(coordinator: coordinator, startInLauncher: true)
+        coordinator.collapseToLauncher = { [weak self] in
+            self?.windowManager?.collapseToLauncher()
+        }
         
         // Create and start hotkey listener
         hotkeyListener = GlobalInputListener()

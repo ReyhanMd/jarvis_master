@@ -4,12 +4,12 @@
 
 ### Option A: From Terminal
 ```bash
-cd /Users/reyhan/jarvis_master/native/mac/CaptureService
+cd /Users/reyhan/shail_master/native/mac/CaptureService
 open CaptureService.xcodeproj
 ```
 
 ### Option B: From Finder
-1. Navigate to: `/Users/reyhan/jarvis_master/native/mac/CaptureService/`
+1. Navigate to: `/Users/reyhan/shail_master/native/mac/CaptureService/`
 2. Double-click: `CaptureService.xcodeproj`
 
 Xcode will open the project.
@@ -40,7 +40,7 @@ Xcode will open the project.
 
 ### From Terminal:
 ```bash
-cd /Users/reyhan/jarvis_master/native/mac/AccessibilityBridge
+cd /Users/reyhan/shail_master/native/mac/AccessibilityBridge
 open AccessibilityBridge.xcodeproj
 ```
 
@@ -84,7 +84,7 @@ tccutil reset Accessibility com.shail.AccessibilityBridge
 In a **new terminal window** (keep Xcode running):
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./START_NATIVE_SERVICES.sh
 ```
 
@@ -162,7 +162,7 @@ Once everything works, you can run native services in background:
 
 ```bash
 # Build Release versions
-cd /Users/reyhan/jarvis_master/native/mac/CaptureService
+cd /Users/reyhan/shail_master/native/mac/CaptureService
 xcodebuild -project CaptureService.xcodeproj -scheme CaptureService -configuration Release
 
 cd ../AccessibilityBridge

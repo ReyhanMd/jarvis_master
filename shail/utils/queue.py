@@ -8,7 +8,12 @@ Provides:
 """
 
 import json
-import redis
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    redis = None
+    REDIS_AVAILABLE = False
 from typing import Optional, Dict, Any
 from apps.shail.settings import get_settings
 
@@ -29,15 +34,17 @@ class TaskQueue:
             redis_url: Redis connection URL (defaults to settings)
             queue_name: Queue name (defaults to settings)
         """
+        if not REDIS_AVAILABLE:
+            raise ImportError("redis is not installed. Install with: pip install redis")
         settings = get_settings()
         self.redis_url = redis_url or settings.redis_url
         self.queue_name = queue_name or settings.task_queue_name
         
         # Initialize Redis connection (will connect on first use)
-        self._redis_client: Optional[redis.Redis] = None
+        self._redis_client: Optional[Any] = None
     
     @property
-    def redis(self) -> redis.Redis:
+    def redis(self) -> Any:
         """Lazy initialization of Redis client."""
         if self._redis_client is None:
             try:

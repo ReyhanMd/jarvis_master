@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LangGraph Visualization</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: transparent;
+            overflow: hidden;
+        }
+        
+        #graph-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        .react-flow__node {
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .react-flow__node:hover {
+            transform: scale(1.05);
+        }
+        
+        .react-flow__edge {
+            transition: stroke-width 0.3s ease;
+        }
+        
+        .react-flow__edge.active {
+            stroke-width: 3px;
+            stroke: #fbbf24;
+        }
+    </style>
+</head>
+<body>
+    <div id="graph-container"></div>
+    
+    <!-- React Flow from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xyflow/react@1.32.0/dist/xyflow.min.js"></script>
+    
+    <script>
+        const { React, ReactDOM } = window;
+        const { ReactFlow, Background, Controls, MiniMap, useNodesState, useEdgesState, MarkerType } = window.ReactFlow;
+        
+        // Node types configuration
+        const nodeTypes = {
+            Master: {
+                color: '#9333ea',
+                icon: '🧠',
+                shape: 'circle'
+            },
+            Sub: {
+                color: '#3b82f6',
+                icon: '👤',
+                shape: 'circle'
+            },
+            Action: {
+                color: '#10b981',
+                icon: '⚡',
+                shape: 'rect'
+            },
+            Verification: {
+                color: '#06b6d4',
+                icon: '✓',
+                shape: 'rect'
+            },
+            Software: {
+                color: '#f97316',
+                icon: '💻',
+                shape: 'rect'
+            }
+        };
+        
+        // Status colors
+        const statusColors = {
+            active: '#fbbf24',
+            completed: '#10b981',
+            failed: '#ef4444',
+            pending: '#6b7280'
+        };
+        
+        // Graph component
+        function GraphVisualization() {
+            const [nodes, setNodes, onNodesChange] = useNodesState([]);
+            const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+            const [graphState, setGraphState] = React.useState(null);
+            
+            // Initialize with default layout
+            React.useEffect(() => {
+                const defaultNodes = [
+                    { id: 'master', type: 'default', position: { x: 400, y: 50 }, data: { label: 'Master Planner', nodeType: 'Master', status: 'pending' } }
+                ];
+                const defaultEdges = [];
+                setNodes(defaultNodes);
+                setEdges(defaultEdges);
+            }, []);
+            
+            // Update graph state from Swift
+            window.updateGraphState = function(stateJson) {
+                try {
+                    const state = typeof stateJson === 'string' ? JSON.parse(stateJson) : stateJson;
+                    setGraphState(state);
+                    updateGraph(state);
+                } catch (error) {
+                    console.error('Error parsing graph state:', error);
+                }
+            };
+            
+            function updateGraph(state) {
+                if (!state) return;
+                
+                const newNodes = [];
+                const newEdges = [];
+                
+                // Master node
+                const masterStatus = state.status === 'completed' ? 'completed' : 
+                                    state.status === 'failed' ? 'failed' : 
+                                    state.status === 'planning' ? 'active' : 'pending';
+                
+                newNodes.push({
+                    id: 'master',
+                    type: 'default',
+                    position: { x: 400, y: 50 },
+                    data: {
+                        label: 'Master Planner',
+                        nodeType: 'Master',
+                        status: masterStatus
+                    },
+                    style: {
+                        background: getNodeColor('Master', masterStatus),
+                        color: '#fff',
+                        border: masterStatus === 'active' ? '3px solid #fbbf24' : '2px solid #fff',
+                        borderRadius: '50%',
+                        width: 80,
+                        height: 80,
+                        fontSize: '12px',
+                        fontWeight: 'bold'
+                    }
+                });
+                
+                // Graph nodes from state
+                const graphNodes = state.nodes && state.nodes.length > 0 ? state.nodes : 
+                                  ['retrieve_context', 'generate_plan', 'execute_step', 'verify_step', 'finalize'];
+                
+                const nodeSpacing = 200;
+                const startX = 400 - (graphNodes.length - 1) * nodeSpacing / 2;
+                const nodeY = 200;
+                
+                graphNodes.forEach((nodeId, index) => {
+                    const x = startX + index * nodeSpacing;
+                    const isActive = nodeId === state.currentNode;
+                    const status = isActive ? 'active' : 
+                                  state.status === 'completed' && index < graphNodes.length - 1 ? 'completed' :
+                                  state.status === 'failed' && isActive ? 'failed' : 'pending';
+                    
+                    const nodeType = getNodeType(nodeId);
+                    
+                    newNodes.push({
+                        id: nodeId,
+                        type: 'default',
+                        position: { x, y: nodeY },
+                        data: {
+                            label: formatNodeLabel(nodeId),
+                            nodeType: nodeType,
+                            status: status,
+                            nodeId: nodeId
+                        },
+                        style: {
+                            background: getNodeColor(nodeType, status),
+                            color: '#fff',
+                            border: status === 'active' ? '3px solid #fbbf24' : '2px solid #fff',
+                            borderRadius: nodeType === 'Master' || nodeType === 'Sub' ? '50%' : '8px',
+                            width: nodeType === 'Master' || nodeType === 'Sub' ? 100 : 120,
+                            height: nodeType === 'Master' || nodeType === 'Sub' ? 100 : 60,
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                        }
+                    });
+                });
+                
+                // Edges from state
+                if (state.edges && state.edges.length > 0) {
+                    state.edges.forEach(edge => {
+                        if (edge.to === 'END') return; // Skip END edges
+                        
+                        const isActive = edge.from === state.currentNode || edge.to === state.currentNode;
+                        
+                        newEdges.push({
+                            id: `edge-${edge.from}-${edge.to}`,
+                            source: edge.from,
+                            target: edge.to,
+                            type: 'smoothstep',
+                            animated: isActive,
+                            style: {
+                                stroke: isActive ? '#fbbf24' : '#6b7280',
+                                strokeWidth: isActive ? 3 : 2
+                            },
+                            markerEnd: {
+                                type: MarkerType.ArrowClosed,
+                                color: isActive ? '#fbbf24' : '#6b7280'
+                            },
+                            label: edge.condition || ''
+                        });
+                    });
+                } else {
+                    // Fallback: sequential edges
+                    for (let i = 0; i < newNodes.length - 1; i++) {
+                        if (newNodes[i].id !== 'master' && newNodes[i + 1].id !== 'master') {
+                            newEdges.push({
+                                id: `edge-${newNodes[i].id}-${newNodes[i + 1].id}`,
+                                source: newNodes[i].id,
+                                target: newNodes[i + 1].id,
+                                type: 'smoothstep',
+                                style: { stroke: '#6b7280', strokeWidth: 2 },
+                                markerEnd: { type: MarkerType.ArrowClosed, color: '#6b7280' }
+                            });
+                        }
+                    }
+                }
+                
+                setNodes(newNodes);
+                setEdges(newEdges);
+            }
+            
+            function getNodeType(nodeId) {
+                if (nodeId.includes('execute')) return 'Action';
+                if (nodeId.includes('verify')) return 'Verification';
+                if (nodeId.includes('generate') || nodeId.includes('plan')) return 'Sub';
+                if (nodeId.includes('context') || nodeId.includes('retrieve')) return 'Sub';
+                if (nodeId.includes('finalize')) return 'Sub';
+                return 'Sub';
+            }
+            
+            function formatNodeLabel(nodeId) {
+                return nodeId
+                    .replace(/_/g, ' ')
+                    .split(' ')
+                    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                    .join(' ');
+            }
+            
+            function getNodeColor(nodeType, status) {
+                const baseColor = nodeTypes[nodeType]?.color || '#6b7280';
+                const statusColor = statusColors[status] || statusColors.pending;
+                
+                if (status === 'active') {
+                    return statusColor;
+                } else if (status === 'completed') {
+                    return baseColor;
+                } else if (status === 'failed') {
+                    return statusColors.failed;
+                }
+                return baseColor + '80'; // 50% opacity for pending
+            }
+            
+            const onNodeClick = (event, node) => {
+                // Send node click to Swift
+                if (window.webkit?.messageHandlers?.nodeClick) {
+                    window.webkit.messageHandlers.nodeClick.postMessage(node.id);
+                } else if (window.swiftBridge) {
+                    window.swiftBridge.postMessage(node.id);
+                } else {
+                    console.log('Node clicked:', node.id);
+                }
+            };
+            
+            return React.createElement(ReactFlow,
+                {
+                    nodes: nodes,
+                    edges: edges,
+                    onNodesChange: onNodesChange,
+                    onEdgesChange: onEdgesChange,
+                    onNodeClick: onNodeClick,
+                    fitView: true,
+                    minZoom: 0.1,
+                    maxZoom: 2
+                },
+                React.createElement(Background, { variant: 'dots', gap: 12, size: 1 }),
+                React.createElement(Controls),
+                React.createElement(MiniMap, { 
+                    nodeColor: (node) => {
+                        const status = node.data?.status || 'pending';
+                        return statusColors[status] || statusColors.pending;
+                    },
+                    maskColor: 'rgba(0, 0, 0, 0.1)'
+                })
+            );
+        }
+        
+        // Render the graph
+        const root = ReactDOM.createRoot(document.getElementById('graph-container'));
+        root.render(React.createElement(GraphVisualization));
+        
+        console.log('✅ React Flow graph initialized');
+    </script>
+</body>
+</html>
+

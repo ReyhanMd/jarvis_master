@@ -48,6 +48,31 @@ def last_messages(limit: int = 20) -> List[Tuple[str, str]]:
     return rows[::-1]
 
 
+def get_chat_history(limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    Fetch chat history ordered by id ascending.
+    """
+    cx = _conn()
+    cur = cx.execute(
+        "SELECT id, role, text, ts FROM convo ORDER BY id ASC LIMIT ?",
+        (limit,),
+    )
+    rows = cur.fetchall()
+    cx.close()
+    history = []
+    for row in rows:
+        msg_id, role, text, ts = row
+        history.append(
+            {
+                "id": str(msg_id),
+                "role": role,
+                "text": text,
+                "timestamp": ts,
+            }
+        )
+    return history
+
+
 # Task store functions for async execution
 
 def create_task(task_id: str, request: Dict[str, Any]) -> None:

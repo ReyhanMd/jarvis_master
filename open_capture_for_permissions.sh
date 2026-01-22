@@ -2,7 +2,7 @@
 
 # Script to open the correct CaptureService.app location for permission setup
 
-APP_PATH="/Users/reyhan/jarvis_master/native/mac/CaptureService/DerivedData/CaptureService/Build/Products/Debug/CaptureService.app"
+APP_PATH="/Users/reyhan/shail_master/native/mac/CaptureService/DerivedData/CaptureService/Build/Products/Debug/CaptureService.app"
 
 if [ ! -d "$APP_PATH" ]; then
     echo "❌ CaptureService.app not found at:"

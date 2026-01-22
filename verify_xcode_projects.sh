@@ -7,7 +7,7 @@ echo ""
 
 # Check CaptureService
 echo "📦 Checking CaptureService project..."
-cd /Users/reyhan/jarvis_master/native/mac/CaptureService
+cd /Users/reyhan/shail_master/native/mac/CaptureService
 
 # Check if all Swift files exist
 files=("main.swift" "ScreenCaptureService.swift" "WebSocketServer.swift" "PermissionManager.swift")
@@ -57,7 +57,7 @@ echo ""
 
 # Check AccessibilityBridge
 echo "📦 Checking AccessibilityBridge project..."
-cd /Users/reyhan/jarvis_master/native/mac/AccessibilityBridge
+cd /Users/reyhan/shail_master/native/mac/AccessibilityBridge
 
 files=("main.swift" "AccessibilityBridge.swift" "AXWebSocketServer.swift" "AXPermissionManager.swift")
 missing=0

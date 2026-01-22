@@ -62,20 +62,20 @@ This will route to the FriendAgent and should work.
 
 ```bash
 # Worker logs
-tail -f /Users/reyhan/jarvis_master/worker.log
+tail -f /Users/reyhan/shail_master/worker.log
 
 # API logs  
-tail -f /Users/reyhan/jarvis_master/api.log
+tail -f /Users/reyhan/shail_master/api.log
 
 # UI logs
-tail -f /Users/reyhan/jarvis_master/ui.log
+tail -f /Users/reyhan/shail_master/ui.log
 ```
 
 ## 🔥 Stop All Services
 
 When you're done testing:
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 kill 4799 4840 4871
 redis-cli shutdown
 ```
@@ -84,7 +84,7 @@ redis-cli shutdown
 
 To restart all services fresh:
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./RESTART_ALL.sh
 ```
 

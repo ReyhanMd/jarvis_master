@@ -14,7 +14,7 @@ Open a **NEW terminal window** and run:
 
 ```bash
 # Navigate to project
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # Activate virtual environment
 source jarvis-env/bin/activate
@@ -26,7 +26,7 @@ source jarvis-env/bin/activate
 **OR** you can use the direct runner:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source jarvis-env/bin/activate
 python run_worker.py
 ```
@@ -38,7 +38,7 @@ If everything is working, you should see:
 ```
 ✓ Found .env file - configuration will be loaded automatically
 Starting Shail Worker...
-Project root: /Users/reyhan/jarvis_master
+Project root: /Users/reyhan/shail_master
 Using virtual environment Python: jarvis-env/bin/python
 ✓ Loaded shail module
 [Worker] Starting task worker (polling queue 'shail_tasks')...

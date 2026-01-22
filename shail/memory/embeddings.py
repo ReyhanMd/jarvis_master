@@ -1,7 +1,12 @@
 """Embedding utilities for RAG (Gemini)."""
 
 from typing import List
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    GENAI_AVAILABLE = False
 
 from apps.shail.settings import get_settings
 
@@ -11,6 +16,8 @@ class EmbeddingError(Exception):
 
 
 def _configure():
+    if not GENAI_AVAILABLE:
+        raise EmbeddingError("google.generativeai is not installed. Install with: pip install google-generativeai")
     settings = get_settings()
     if not settings.gemini_api_key:
         raise EmbeddingError("GEMINI_API_KEY is missing for embeddings.")

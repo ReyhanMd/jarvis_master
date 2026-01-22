@@ -53,21 +53,21 @@ For Shail to work, you need **4 terminals**:
 
 2. **Terminal 2: Shail Worker** (The Brain)
    ```bash
-   cd /Users/reyhan/jarvis_master
+   cd /Users/reyhan/shail_master
    source jarvis-env/bin/activate
    ./start_worker.sh
    ```
 
 3. **Terminal 3: Shail API** (The Front Door)
    ```bash
-   cd /Users/reyhan/jarvis_master
+   cd /Users/reyhan/shail_master
    source jarvis-env/bin/activate
    uvicorn apps.shail.main:app --reload
    ```
 
 4. **Terminal 4: Shail UI** (The Cockpit)
    ```bash
-   cd /Users/reyhan/jarvis_master/apps/shail-ui
+   cd /Users/reyhan/shail_master/apps/shail-ui
    npm run dev
    ```
 

@@ -15,7 +15,10 @@ from fastapi import FastAPI, HTTPException
 # Handle imports for both module and direct script execution
 # Add parent directory to path for direct script execution
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.dirname(_script_dir)
+_parent_dir = os.path.dirname(_script_dir)  # services/
+_project_root = os.path.dirname(_parent_dir)  # project root
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
@@ -79,8 +82,8 @@ class PlannerService:
         # Active plans
         self.plans: Dict[str, Plan] = {}
         
-        # LangGraph workflow
-        self.graph = create_planner_graph(self)
+        # LangGraph workflow with checkpointing
+        self.graph = create_planner_graph(self, persistent=True)
         
         # WebSocket manager for state broadcasting (optional)
         self.websocket_manager = None

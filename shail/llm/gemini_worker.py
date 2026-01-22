@@ -1,7 +1,7 @@
 """Gemini worker LLM for SHAIL."""
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional, List
 from apps.shail.settings import get_settings
 
 logger = logging.getLogger(__name__)

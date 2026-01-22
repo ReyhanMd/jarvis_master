@@ -23,7 +23,7 @@ This shows the debug console at the bottom where ALL output appears.
 
 ### 1. Open CaptureService in Xcode
 ```bash
-open /Users/reyhan/jarvis_master/native/mac/CaptureService/CaptureService.xcodeproj
+open /Users/reyhan/shail_master/native/mac/CaptureService/CaptureService.xcodeproj
 ```
 
 ### 2. In Xcode Window:
@@ -102,7 +102,7 @@ In Xcode:
 
 Make sure you applied my fixes:
 1. Open project file (not in Xcode, in Cursor):
-   `/Users/reyhan/jarvis_master/native/mac/CaptureService/CaptureService.xcodeproj/project.pbxproj`
+   `/Users/reyhan/shail_master/native/mac/CaptureService/CaptureService.xcodeproj/project.pbxproj`
    
 2. Search for: `CODE_SIGN_IDENTITY`
    Should be: `CODE_SIGN_IDENTITY = "-";`

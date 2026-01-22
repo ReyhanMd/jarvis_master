@@ -5,8 +5,8 @@
 echo "🚀 Opening Xcode Projects..."
 echo ""
 
-CAPTURE_PROJECT="/Users/reyhan/jarvis_master/native/mac/CaptureService/CaptureService.xcodeproj"
-ACCESS_PROJECT="/Users/reyhan/jarvis_master/native/mac/AccessibilityBridge/AccessibilityBridge.xcodeproj"
+CAPTURE_PROJECT="/Users/reyhan/shail_master/native/mac/CaptureService/CaptureService.xcodeproj"
+ACCESS_PROJECT="/Users/reyhan/shail_master/native/mac/AccessibilityBridge/AccessibilityBridge.xcodeproj"
 
 # Verify projects exist
 if [ ! -d "$CAPTURE_PROJECT" ]; then

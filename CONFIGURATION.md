@@ -10,7 +10,7 @@ The easiest and most user-friendly way to configure Shail is using a `.env` file
 
 1. **Copy the example file:**
    ```bash
-   cd /Users/reyhan/jarvis_master
+   cd /Users/reyhan/shail_master
    cp .env.example .env
    ```
 

@@ -57,6 +57,8 @@ services_env/
 
 # Xcode build artifacts
 native/mac/*/DerivedData/
+apps/mac/*/DerivedData/
+apps/mac/*/.build/
 *.xcuserdata
 *.xcworkspace
 *.xcodeproj/xcuserdata/

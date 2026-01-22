@@ -25,6 +25,7 @@ class TaskRequest(BaseModel):
     text: str = Field(..., description="Primary instruction or request")
     mode: Optional[str] = Field(default="auto", description="auto|code|bio|robo|plasma|research")
     attachments: Optional[List[Attachment]] = None
+    desktop_id: Optional[str] = Field(default=None, description="Desktop context ID for multi-desktop support")
 
 
 class RoutingDecision(BaseModel):

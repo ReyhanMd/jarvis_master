@@ -6,10 +6,14 @@ import sys
 import os
 from typing import TypedDict, Annotated, Optional, List, Dict, Any
 from loguru import logger
+from shail.orchestration.checkpointing import create_checkpointer
 
 # Handle imports for both module and direct script execution
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.dirname(_script_dir)
+_parent_dir = os.path.dirname(_script_dir)  # services/
+_project_root = os.path.dirname(_parent_dir)  # project root
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
@@ -22,7 +26,7 @@ except ImportError:
     HAS_LANGGRAPH = False
 
 
-class PlannerState(TypedDict):
+class PlannerState(TypedDict, total=False):
     """State for planner graph"""
     task_description: str
     context: List[str]
@@ -31,9 +35,15 @@ class PlannerState(TypedDict):
     execution_results: List[Dict]
     status: str
     error: Optional[str]
+    agent_history: List[Dict[str, Any]]
+    tool_history: List[Dict[str, Any]]
+    recovery_attempts: int
+    permission_requests: List[Dict[str, Any]]
+    events: List[Dict[str, Any]]
+    metadata: Dict[str, Any]
 
 
-def create_planner_graph(planner_service):
+def create_planner_graph(planner_service, persistent: bool = True):
     """
     Create LangGraph workflow for planning and execution.
     
@@ -139,7 +149,8 @@ def create_planner_graph(planner_service):
     workflow.add_edge("replan", "execute_step")
     workflow.add_edge("finalize", END)
     
-    return workflow.compile()
+    checkpointer = create_checkpointer(persistent=persistent)
+    return workflow.compile(checkpointer=checkpointer)
 
 
 def serialize_graph_state(state: PlannerState, graph_instance=None) -> Dict[str, Any]:
@@ -160,7 +171,12 @@ def serialize_graph_state(state: PlannerState, graph_instance=None) -> Dict[str,
         "error": state.get("error"),
         "plan_steps": state.get("plan_steps", []),
         "execution_results": state.get("execution_results", []),
-        "context": state.get("context", [])
+        "context": state.get("context", []),
+        "agent_history": state.get("agent_history", []),
+        "tool_history": state.get("tool_history", []),
+        "recovery_attempts": state.get("recovery_attempts", 0),
+        "permission_requests": state.get("permission_requests", []),
+        "events": state.get("events", []),
     }
     
     # Add graph structure if available
@@ -251,7 +267,10 @@ def serialize_graph_state(state: PlannerState, graph_instance=None) -> Dict[str,
         "has_error": bool(state.get("error")),
         "step_count": len(state.get("plan_steps", [])),
         "completed_steps": state.get("current_step", 0),
-        "has_context": len(state.get("context", [])) > 0
+        "has_context": len(state.get("context", [])) > 0,
+        "recovery_attempts": state.get("recovery_attempts", 0),
+        "agent_history_length": len(state.get("agent_history", [])),
+        "tool_history_length": len(state.get("tool_history", [])),
     }
     
     return serialized

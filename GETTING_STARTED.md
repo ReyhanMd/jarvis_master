@@ -9,7 +9,7 @@ All native services and AI orchestration components have been created and are re
 ### 1. Make Scripts Executable
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 chmod +x START_NATIVE_SERVICES.sh STOP_NATIVE_SERVICES.sh
 ```
 

@@ -31,7 +31,7 @@ The permission system was **too complex** and broke the tool execution:
 ## How to Restart Services
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./RESTART_ALL.sh
 ```
 

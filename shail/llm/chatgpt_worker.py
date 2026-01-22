@@ -1,7 +1,7 @@
 """ChatGPT worker LLM for SHAIL."""
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Optional
 import os
 
 logger = logging.getLogger(__name__)

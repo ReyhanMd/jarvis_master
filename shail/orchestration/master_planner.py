@@ -27,11 +27,12 @@ from shail.core.types import (
 )
 from shail.core.agent_registry import format_capabilities_for_llm, list_all_agents, AGENT_CAPABILITIES
 from apps.shail.settings import get_settings
+from shail.memory import rag
 
 # New Perception Imports
-from shail.perception.buffer import GroundingBuffer
 from shail.perception.grounding_agent import GroundingAgent
 from shail.perception.vision_agent import VisionObservationAgent
+from shail.perception.native_bridge import get_native_bridge
 
 
 class MasterPlanner:
@@ -52,10 +53,15 @@ class MasterPlanner:
         self.agent_capabilities = format_capabilities_for_llm()
         self.available_agents = list_all_agents()
         
-        # Initialize Perception Layer
-        self.buffer = GroundingBuffer()
+        # Initialize Perception Layer (Native Bridge)
+        bridge = get_native_bridge()
+        bridge.start()
+        self.buffer = bridge.buffer
         self.grounding_agent = GroundingAgent(self.buffer)
-        self.vision_agent = VisionObservationAgent()
+        self.vision_agent = VisionObservationAgent(
+            connector=bridge.connector,
+            buffer=self.buffer,
+        )
         
         # Build keyword lookup maps for fast routing
         self._build_keyword_maps()
@@ -100,6 +106,27 @@ class MasterPlanner:
         triggers = ["error", "bug", "crash", "saw", "what happened", "fix this", "why is"]
         return any(t in text.lower() for t in triggers)
 
+    def _buffer_has_data(self) -> bool:
+        try:
+            return bool(self.buffer._ax_events or self.buffer._frames)
+        except Exception:
+            return False
+
+    def _retrieve_memory_context(self, query: str) -> str:
+        try:
+            results = rag.search(query, k=3)
+        except Exception:
+            results = []
+        if not results:
+            return ""
+        lines = []
+        for content, score, metadata in results:
+            snippet = content.replace("\n", " ").strip()
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"- ({score:.2f}) {snippet}")
+        return "\n".join(lines)
+
     def _execute_symbiotic_loop(self, user_query: str) -> RoutingDecision:
         """
         Executes the Master-Grounding-Vision Triad + Swaraj Loop (Generate-Verify-Refine).
@@ -110,6 +137,8 @@ class MasterPlanner:
         CONFIDENCE_ESCALATE = 0.4
 
         # --- PHASE 1: Perception (Gather Context) ---
+        if not self._buffer_has_data():
+            print("[SymbioticController] Warning: Grounding buffer is empty. Check native services.")
         grounding_result = self.grounding_agent.find_event(user_query, max_glances=MAX_GLANCES)
 
         # If we failed to localize confidently, escalate to user guidance
@@ -144,6 +173,9 @@ class MasterPlanner:
             context += f"Observation: {vision_obs.text}\n"
             if vision_obs.is_anomaly:
                 context += f"Anomalies Detected: {vision_obs.detected_anomalies}\n"
+        memory_context = self._retrieve_memory_context(user_query)
+        if memory_context:
+            context += f"Memory:\n{memory_context}\n"
 
         # --- PHASE 2: Swaraj Loop (Generate -> Verify -> Refine) ---
         budget = 3
@@ -159,8 +191,17 @@ class MasterPlanner:
             print(f"[SwarajLoop] Iteration {loop_count}/{budget}")
 
             gen_prompt = self._build_generation_prompt(context, current_solution)
-            response = self.llm.invoke(gen_prompt)
-            current_solution = response.content
+            try:
+                response = self._invoke_llm_with_timeout(gen_prompt, timeout_seconds=8.0)
+                current_solution = response.content if hasattr(response, "content") else str(response)
+            except Exception as exc:
+                err = self._format_llm_error(exc)
+                print(f"[SwarajLoop] LLM error: {err}")
+                return RoutingDecision(
+                    agent="code",
+                    confidence=0.3,
+                    rationale=f"LLM error during Swaraj Loop: {err}",
+                )
 
             verdict = detective.investigate(current_solution, context)
 
@@ -407,7 +448,7 @@ Return ONLY the Python code."""
             )
         except Exception as e:
             # Fallback to code agent on any error
-            error_msg = str(e)[:100]  # Truncate long error messages
+            error_msg = self._format_llm_error(e)
             print(f"[MasterPlanner] Error during LLM routing: {error_msg}")
             return RoutingDecision(
                 agent="code",
@@ -425,6 +466,7 @@ Return ONLY the Python code."""
         Returns:
             Formatted prompt string
         """
+        memory_context = self._retrieve_memory_context(user_text)
         prompt = f"""You are ShailCore, the master planner for a multi-agent AI system called Shail.
 
 Your ONLY job is to analyze a user's request and determine which single agent should handle it.
@@ -432,6 +474,9 @@ Your ONLY job is to analyze a user's request and determine which single agent sh
 {self.agent_capabilities}
 
 User Request: "{user_text}"
+
+Relevant Memory (if any):
+{memory_context or "None"}
 
 Analyze the user's request and determine which agent is best suited to handle it.
 
@@ -452,6 +497,36 @@ Important guidelines:
 Return ONLY the JSON object, no other text:"""
         
         return prompt
+
+    def _invoke_llm_with_timeout(self, prompt: str, timeout_seconds: float = 8.0):
+        result_container = {"response": None, "error": None}
+
+        def invoke_llm():
+            try:
+                result_container["response"] = self.llm.invoke(prompt)
+            except Exception as e:
+                result_container["error"] = e
+
+        llm_thread = threading.Thread(target=invoke_llm, daemon=True)
+        llm_thread.start()
+        llm_thread.join(timeout=timeout_seconds)
+
+        if llm_thread.is_alive():
+            raise TimeoutError(f"LLM timeout after {timeout_seconds:.1f}s")
+        if result_container["error"]:
+            raise result_container["error"]
+        if result_container["response"] is None:
+            raise RuntimeError("LLM returned no response")
+        return result_container["response"]
+
+    def _format_llm_error(self, exc: Exception) -> str:
+        settings = get_settings()
+        if not settings.gemini_api_key:
+            return "Missing API Key (GEMINI_API_KEY is empty)"
+        message = str(exc)
+        if "timed out" in message.lower():
+            return f"Timeout: {message}"
+        return message
     
     def _parse_llm_response(self, response_text: str) -> RoutingDecision:
         """

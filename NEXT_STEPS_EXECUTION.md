@@ -23,7 +23,7 @@
 
 1. **Open AccessibilityBridge in Xcode:**
    ```bash
-   open /Users/reyhan/jarvis_master/native/mac/AccessibilityBridge/AccessibilityBridge.xcodeproj
+   open /Users/reyhan/shail_master/native/mac/AccessibilityBridge/AccessibilityBridge.xcodeproj
    ```
 
 2. **Build and Run:**
@@ -52,7 +52,7 @@
 
 **Option A: Use the All-in-One Script (Easiest)**
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./START_ALL.sh
 ```
 
@@ -62,7 +62,7 @@ Open **5 separate terminal windows**:
 
 #### Terminal 1: UI Twin Service
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source services_env/bin/activate  # or create: python3 -m venv services_env
 cd services/ui_twin
 python service.py
@@ -71,7 +71,7 @@ python service.py
 
 #### Terminal 2: Action Executor
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source services_env/bin/activate
 cd services/action_executor
 python service.py
@@ -80,7 +80,7 @@ python service.py
 
 #### Terminal 3: Vision Service
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source services_env/bin/activate
 cd services/vision
 python service.py
@@ -89,7 +89,7 @@ python service.py
 
 #### Terminal 4: RAG Retriever
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source services_env/bin/activate
 cd services/rag_retriever
 python service.py
@@ -98,7 +98,7 @@ python service.py
 
 #### Terminal 5: Planner Service
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source services_env/bin/activate
 export GEMINI_API_KEY="your-key-here"  # Required!
 cd services/planner
@@ -120,7 +120,7 @@ redis-server
 
 #### Terminal 7: Shail Worker
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 export GEMINI_API_KEY="your-key-here"  # Required!
 python -m shail.workers.task_worker
 ```
@@ -128,14 +128,14 @@ python -m shail.workers.task_worker
 
 #### Terminal 8: Shail API
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 uvicorn apps.shail.main:app --reload
 ```
 **Expected:** `INFO: Uvicorn running on http://127.0.0.1:8000`
 
 #### Terminal 9: Shail UI (Optional - Web Dashboard)
 ```bash
-cd /Users/reyhan/jarvis_master/apps/shail-ui
+cd /Users/reyhan/shail_master/apps/shail-ui
 npm install  # First time only
 npm run dev
 ```
@@ -147,7 +147,7 @@ npm run dev
 
 ### Test 1: Verify Native Services
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./check_native_health.sh
 ```
 
@@ -284,7 +284,7 @@ curl -X POST http://localhost:8000/tasks \
 
 ### Start Everything (Recommended)
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # 1. Start native services (if not already running in Xcode)
 ./run_native_services.sh
@@ -326,7 +326,7 @@ redis-cli ping  # Redis
 ### Issue: "Module not found" errors
 **Solution:**
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source services_env/bin/activate
 pip install -r requirements.txt
 ```

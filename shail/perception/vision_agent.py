@@ -9,6 +9,7 @@ import json
 from typing import Dict, List, Optional
 
 from shail.core.types import NarrativeSegment, VisionObservation
+from shail.perception.buffer import GroundingBuffer
 
 
 class VisionObservationAgent:
@@ -16,7 +17,13 @@ class VisionObservationAgent:
     The Observer. Sees *what* happened, with a bias towards anomalies and token efficiency.
     """
 
-    def __init__(self, connector=None, vlm_client=None, token_budget: int = 4000):
+    def __init__(
+        self,
+        connector=None,
+        vlm_client=None,
+        token_budget: int = 4000,
+        buffer: Optional[GroundingBuffer] = None,
+    ):
         """
         connector: optional PerceptionServiceConnector for frame requests
         vlm_client: optional VLM client (e.g., Gemini 1.5 Pro Vision)
@@ -24,6 +31,7 @@ class VisionObservationAgent:
         self.connector = connector
         self.vlm = vlm_client
         self.token_budget = token_budget
+        self.buffer = buffer
 
     def observe(self, segment: NarrativeSegment, focus_prompt: str) -> VisionObservation:
         """
@@ -55,6 +63,23 @@ class VisionObservationAgent:
         Request frames for the segment time window.
         If no connector is available, returns an empty list (fallback to narrative).
         """
+        if self.buffer:
+            try:
+                result = self.buffer.query_temporal_range(segment.start_time, segment.end_time)
+                if result.frames:
+                    return [
+                        {
+                            "path": frame.path,
+                            "ts": frame.ts,
+                            "width": frame.width,
+                            "height": frame.height,
+                            "hash": frame.hash,
+                        }
+                        for frame in result.frames
+                    ]
+            except Exception:
+                pass
+
         if not self.connector:
             return []
 

@@ -9,7 +9,7 @@ You're getting `ModuleNotFoundError: No module named 'redis'` because the requir
 Install all dependencies in your `jarvis-env` virtual environment:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # Activate your virtual environment
 source jarvis-env/bin/activate
@@ -58,7 +58,7 @@ python run_worker.py
 Copy and paste this entire block:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 source jarvis-env/bin/activate
 pip install fastapi uvicorn pydantic python-dotenv langchain langchain-google-genai langchain-core redis requests
 ```

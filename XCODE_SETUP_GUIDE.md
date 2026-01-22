@@ -40,7 +40,7 @@ Build version 15A240d
 ### Step 3: Build Native Services
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # This will automatically build native services
 ./START_NATIVE_SERVICES.sh

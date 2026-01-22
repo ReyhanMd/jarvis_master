@@ -56,7 +56,7 @@ Complete implementation of the real-time system layer with native services and A
 ## Directory Structure
 
 ```
-jarvis_master/
+shail_master/
 │
 ├── shail/                    # Existing Python agents + router
 │

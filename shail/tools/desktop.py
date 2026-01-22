@@ -41,30 +41,32 @@ else:
     _keyboard = None
     _mouse = None
 
-
-# Special key mappings
-SPECIAL_KEYS = {
-    "enter": Key.enter,
-    "space": Key.space,
-    "tab": Key.tab,
-    "shift": Key.shift,
-    "ctrl": Key.ctrl,
-    "alt": Key.alt,
-    "cmd": Key.cmd,
-    "win": Key.cmd,
-    "esc": Key.esc,
-    "backspace": Key.backspace,
-    "delete": Key.delete,
-    "up": Key.up,
-    "down": Key.down,
-    "left": Key.left,
-    "right": Key.right,
-    "home": Key.home,
-    "end": Key.end,
-    "page_up": Key.page_up,
-    "page_down": Key.page_down,
-    "caps_lock": Key.caps_lock,
-}
+# Special key mappings (only if Key is available)
+if INPUT_LIBS_AVAILABLE:
+    SPECIAL_KEYS = {
+        "enter": Key.enter,
+        "space": Key.space,
+        "tab": Key.tab,
+        "shift": Key.shift,
+        "ctrl": Key.ctrl,
+        "alt": Key.alt,
+        "cmd": Key.cmd,
+        "win": Key.cmd,
+        "esc": Key.esc,
+        "backspace": Key.backspace,
+        "delete": Key.delete,
+        "up": Key.up,
+        "down": Key.down,
+        "left": Key.left,
+        "right": Key.right,
+        "home": Key.home,
+        "end": Key.end,
+        "page_up": Key.page_up,
+        "page_down": Key.page_down,
+        "caps_lock": Key.caps_lock,
+    }
+else:
+    SPECIAL_KEYS = {}
 
 
 def _check_input_libs():

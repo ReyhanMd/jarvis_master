@@ -19,7 +19,7 @@ Real-time accessibility monitoring service for macOS using AXUIElement and AXObs
 ## Building
 
 ```bash
-cd /Users/reyhan/jarvis_master/native/mac/AccessibilityBridge
+cd /Users/reyhan/shail_master/native/mac/AccessibilityBridge
 xcodebuild -project AccessibilityBridge.xcodeproj -scheme AccessibilityBridge -configuration Release
 ```
 

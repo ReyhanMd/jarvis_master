@@ -41,7 +41,7 @@ Test task ID: `eea48063`
 
 ### Start Everything (One Command):
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./RESTART_ALL.sh
 ```
 

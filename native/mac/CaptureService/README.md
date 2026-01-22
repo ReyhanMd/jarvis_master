@@ -19,7 +19,7 @@ Real-time screen capture service for macOS using ScreenCaptureKit.
 ## Building
 
 ```bash
-cd /Users/reyhan/jarvis_master/native/mac/CaptureService
+cd /Users/reyhan/shail_master/native/mac/CaptureService
 xcodebuild -project CaptureService.xcodeproj -scheme CaptureService -configuration Release
 ```
 

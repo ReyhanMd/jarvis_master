@@ -13,9 +13,11 @@ _project_root = Path(__file__).parent.parent.parent
 _env_path = _project_root / ".env"
 if _env_path.exists():
     load_dotenv(_env_path)
+    _env_source = str(_env_path)
 else:
     # Try loading from current directory as fallback
     load_dotenv()
+    _env_source = "cwd"
 
 
 class Settings(BaseModel):
@@ -33,6 +35,17 @@ class Settings(BaseModel):
     kimi_k2_api_key: str = Field(default_factory=lambda: os.getenv("KIMI_K2_API_KEY", ""))
     kimi_k2_model: str = Field(default=os.getenv("KIMI_K2_MODEL", "moonshot-v1-8k"))
     use_kimi_k2_master: bool = Field(default=os.getenv("USE_KIMI_K2_MASTER", "false").lower() == "true")
+    
+    # ChatGPT/OpenAI Worker LLM
+    openai_api_key: str = Field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    openai_model: str = Field(default=os.getenv("OPENAI_MODEL", "gpt-4o"))
+    use_chatgpt_worker: bool = Field(default=os.getenv("USE_CHATGPT_WORKER", "false").lower() == "true")
+    
+    # LangGraph Studio
+    langgraph_studio_url: str = Field(default=os.getenv("LANGGRAPH_STUDIO_URL", "http://localhost:8123"))
+    langgraph_cloud_api_key: str = Field(default_factory=lambda: os.getenv("LANGGRAPH_CLOUD_API_KEY", ""))
+    langgraph_cloud_url: str = Field(default=os.getenv("LANGGRAPH_CLOUD_URL", "https://api.langchain.com"))
+    use_langgraph_cloud: bool = Field(default=os.getenv("USE_LANGGRAPH_CLOUD", "false").lower() == "true")
 
     # Paths
     workspace_root: str = Field(default=os.getenv("SHAIL_WORKSPACE_ROOT", os.getcwd()))
@@ -50,6 +63,12 @@ class Settings(BaseModel):
     # Redis / Queue
     redis_url: str = Field(default=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
     task_queue_name: str = Field(default=os.getenv("SHAIL_TASK_QUEUE", "shail_tasks"))
+    
+    # Service URLs (for LangGraph integration)
+    ui_twin_url: str = Field(default=os.getenv("UI_TWIN_URL", "http://localhost:8001"))
+    action_executor_url: str = Field(default=os.getenv("ACTION_EXECUTOR_URL", "http://localhost:8002"))
+    vision_url: str = Field(default=os.getenv("VISION_URL", "http://localhost:8003"))
+    rag_url: str = Field(default=os.getenv("RAG_URL", "http://localhost:8004"))
 
 
 _settings: Optional[Settings] = None
@@ -59,6 +78,21 @@ def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
+        if not _settings.gemini_api_key:
+            print(
+                f"[Settings] Warning: GEMINI_API_KEY is missing. "
+                f"Loaded .env from {_env_source}."
+            )
+        if not _settings.openai_api_key and _settings.use_chatgpt_worker:
+            print(
+                f"[Settings] Warning: OPENAI_API_KEY is missing. "
+                f"Loaded .env from {_env_source}."
+            )
+        if not _settings.kimi_k2_api_key and _settings.use_kimi_k2_master:
+            print(
+                f"[Settings] Warning: KIMI_K2_API_KEY is missing. "
+                f"Loaded .env from {_env_source}."
+            )
     return _settings
 
 

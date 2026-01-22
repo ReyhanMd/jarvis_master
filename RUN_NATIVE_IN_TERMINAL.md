@@ -7,7 +7,7 @@ Xcode console not showing output and apps exit immediately.
 
 ### Build once in Xcode
 ```bash
-cd /Users/reyhan/jarvis_master/native/mac/CaptureService
+cd /Users/reyhan/shail_master/native/mac/CaptureService
 xcodebuild -project CaptureService.xcodeproj -scheme CaptureService -configuration Debug
 
 cd ../AccessibilityBridge
@@ -91,7 +91,7 @@ Create launch scripts:
 
 ```bash
 # Create launcher
-cat > /Users/reyhan/jarvis_master/run_capture.sh << 'EOF'
+cat > /Users/reyhan/shail_master/run_capture.sh << 'EOF'
 #!/bin/bash
 EXEC=$(find ~/Library/Developer/Xcode/DerivedData -name "CaptureService" -type f -perm +111 2>/dev/null | grep -v ".dSYM" | head -1)
 if [ -z "$EXEC" ]; then
@@ -102,7 +102,7 @@ echo "▶️  Running: $EXEC"
 "$EXEC"
 EOF
 
-chmod +x /Users/reyhan/jarvis_master/run_capture.sh
+chmod +x /Users/reyhan/shail_master/run_capture.sh
 
 # Then just run:
 ./run_capture.sh

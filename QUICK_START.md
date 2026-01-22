@@ -1,118 +1,92 @@
-# 🚀 Quick Start Guide - Fix the Redis Error
+# LangGraph Integration - Quick Start
 
-## The Problem
+## ✅ Setup Complete!
 
-Your worker is showing this error:
-```
-Failed to connect to Redis at redis://localhost:6379/0. Connection refused.
-```
+All code has been implemented. To use it:
 
-This means **Redis server is not running**. Redis is the "message bus" that Shail uses to queue tasks.
-
-## The Solution
-
-### Step 1: Install Redis (if not installed)
-
-**Check if Redis is installed:**
-```bash
-which redis-server
-```
-
-If it says "not found", install it:
-
-**macOS:**
-```bash
-brew install redis
-```
-
-**If you don't have Homebrew:**
-```bash
-# Install Homebrew first
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Then install Redis
-brew install redis
-```
-
-### Step 2: Start Redis Server
-
-**Open a NEW terminal window** (keep your worker terminal running) and run:
+### 1. Install Dependencies
 
 ```bash
-redis-server
+# Run the setup script
+./setup_langgraph.sh
+
+# Or manually:
+pip install -r requirements.txt
+pip install langgraph>=0.2.0 langgraph-checkpoint>=0.2.0
 ```
 
-You should see:
-```
-* Ready to accept connections
-```
+### 2. Configure API Keys
 
-**Leave this terminal running!** Redis needs to stay running in the background.
-
-### Step 3: Verify Redis is Working
-
-In yet another terminal, test Redis:
+Create `.env` file in project root:
 
 ```bash
-redis-cli ping
+# Required
+GEMINI_API_KEY=your_key_here
+KIMI_K2_API_KEY=your_key_here
+
+# Optional (for ChatGPT worker)
+OPENAI_API_KEY=your_key_here
+
+# Optional (for LangGraph Cloud)
+LANGGRAPH_CLOUD_API_KEY=your_key_here
+USE_LANGGRAPH_CLOUD=false
 ```
 
-You should see: `PONG`
-
-### Step 4: Your Worker Should Now Work!
-
-Go back to your worker terminal. The errors should stop, and you should see:
-
-```
-[Worker] No task in queue, sleeping for 5s...
-```
-
-This means the worker is successfully connected to Redis and waiting for tasks!
-
----
-
-## Complete Startup Sequence
-
-For the full Shail system, you need **4 terminal windows**:
-
-### Terminal 1: Redis (Message Bus)
-```bash
-redis-server
-```
-
-### Terminal 2: Shail Worker (The Brain)
-```bash
-cd /Users/reyhan/jarvis_master
-source jarvis-env/bin/activate
-./start_worker.sh
-```
-
-### Terminal 3: Shail API (The Front Door)
-```bash
-cd /Users/reyhan/jarvis_master
-source jarvis-env/bin/activate
-uvicorn apps.shail.main:app --reload
-```
-
-### Terminal 4: Shail UI (The Cockpit)
-```bash
-cd /Users/reyhan/jarvis_master/apps/shail-ui
-npm run dev
-```
-
----
-
-## Quick Install Command
-
-If you just want to install Redis quickly:
+### 3. Verify Installation
 
 ```bash
-# Install Redis
-brew install redis
-
-# Start Redis (in a new terminal)
-redis-server
+python3 -c "from shail.orchestration.langgraph_integration import get_state_graph; print('✅ Working!' if get_state_graph() else '❌ Failed')"
 ```
 
-That's it! Your worker will connect automatically once Redis is running.
+### 4. Run Tests
 
+```bash
+python3 -m pytest tests/test_langgraph_integration.py -v
+```
+
+### 5. Start Shail
+
+```bash
+# Start the service
+./start_shail.sh
+
+# Or manually:
+python3 -m uvicorn apps.shail.main:app --reload
+```
+
+### 6. Test Streaming
+
+Connect to WebSocket: `ws://localhost:8000/ws/brain`
+
+You should see incremental `node_update` events as tasks execute.
+
+## Features Implemented
+
+✅ Multi-agent orchestration with LangGraph
+✅ Real-time streaming via WebSocket
+✅ Checkpointing (memory + SQLite)
+✅ Error recovery with retry
+✅ LangGraph Studio integration
+✅ Production-grade monitoring
+✅ Rate limiting and throttling
+
+## Documentation
+
+- Full details: `docs/LANGGRAPH_INTEGRATION.md`
+- Setup guide: `docs/LANGGRAPH_SETUP_COMPLETE.md`
+
+## Troubleshooting
+
+**Import errors?**
+- Run: `pip install langgraph langgraph-checkpoint`
+- Check: `python3 -c "import langgraph; print(langgraph.__file__)"`
+
+**Streaming not working?**
+- Check WebSocket connection
+- Verify `brain_ws_manager` is initialized
+- Check logs for errors
+
+**Tests failing?**
+- Install pytest: `pip install pytest pytest-asyncio`
+- Check API keys are set
+- Verify LangGraph is installed

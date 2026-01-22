@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
-sys.path.append("/Users/reyhan/jarvis_master")
+sys.path.append("/Users/reyhan/shail_master")
 
 # Mocking external deps that might be broken in env
 sys.modules["langchain_google_genai"] = MagicMock()

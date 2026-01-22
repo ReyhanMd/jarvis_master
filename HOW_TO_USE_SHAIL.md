@@ -4,7 +4,7 @@
 
 ### 1. Start Everything
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./RESTART_ALL.sh
 ```
 
@@ -38,7 +38,7 @@ That's it! 🎉
 ## Stop Everything
 ```bash
 # Use the kill command shown by RESTART_ALL.sh, or:
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 pkill -f "run_worker|uvicorn|vite"
 redis-cli shutdown
 ```

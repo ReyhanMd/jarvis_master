@@ -45,8 +45,8 @@ find_app_bundle() {
 }
 
 # Find .app bundles
-CAPTURE_APP=$(find_app_bundle "CaptureService" "/Users/reyhan/jarvis_master/native/mac/CaptureService/DerivedData/CaptureService/Build/Products/Debug/CaptureService.app")
-ACCESS_APP=$(find_app_bundle "AccessibilityBridge" "/Users/reyhan/jarvis_master/native/mac/AccessibilityBridge/DerivedData/AccessibilityBridge/Build/Products/Debug/AccessibilityBridge.app")
+CAPTURE_APP=$(find_app_bundle "CaptureService" "/Users/reyhan/shail_master/native/mac/CaptureService/DerivedData/CaptureService/Build/Products/Debug/CaptureService.app")
+ACCESS_APP=$(find_app_bundle "AccessibilityBridge" "/Users/reyhan/shail_master/native/mac/AccessibilityBridge/DerivedData/AccessibilityBridge/Build/Products/Debug/AccessibilityBridge.app")
 
 if [ -z "$CAPTURE_APP" ] || [ ! -d "$CAPTURE_APP" ]; then
     echo -e "${YELLOW}⚠️  CaptureService.app not found.${NC}"

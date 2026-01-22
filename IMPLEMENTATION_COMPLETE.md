@@ -4,7 +4,7 @@
 
 ### 1. Complete Folder Structure
 ```
-jarvis_master/
+shail_master/
 ├── native/
 │   ├── mac/
 │   │   ├── CaptureService/        ✅ Full Xcode project

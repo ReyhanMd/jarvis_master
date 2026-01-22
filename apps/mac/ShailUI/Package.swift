@@ -26,12 +26,28 @@ let package = Package(
                 "ChatOverlayView.swift",
                 "DetailView.swift",
                 "BirdsEyeView.swift",
+                "GraphWebView.swift",
                 "VisualEffectBlur.swift",
                 "WindowManager.swift",
                 "GlobalInputListener.swift",
                 "PermissionStatusView.swift",
                 "ChatService.swift",
-                "BackendWebSocketClient.swift"
+                "BackendWebSocketClient.swift",
+                "ChatMessage.swift",
+                "ChatHistoryService.swift",
+                "ChatHistoryView.swift",
+                "TaskService.swift",
+                "TaskResultView.swift",
+                "PermissionRequestView.swift",
+                "PermissionService.swift",
+                "SettingsModel.swift",
+                "SettingsManager.swift",
+                "SettingsView.swift",
+                "DesktopManager.swift",
+                "DesktopListView.swift"
+            ],
+            resources: [
+                .process("Resources")
             ]
         )
     ]

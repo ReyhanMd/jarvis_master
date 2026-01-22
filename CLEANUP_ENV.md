@@ -10,14 +10,14 @@ You have multiple `.env` files in your project:
 
 ## The Solution
 
-Shail looks for `.env` file in the **project root** (`/Users/reyhan/jarvis_master/.env`).
+Shail looks for `.env` file in the **project root** (`/Users/reyhan/shail_master/.env`).
 
 ### Step 1: Verify Your Root .env File
 
 Check that your root `.env` file has your API key:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 cat .env | grep GEMINI_API_KEY
 ```
 
@@ -31,7 +31,7 @@ GEMINI_API_KEY=AIzaSyC0d1jFHVGBjLSrdq_8VhX8OtTH3uj4yOI
 If you want to clean up the old `.env` files:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # Remove old SHAIL/.env (if it exists)
 rm SHAIL/.env 2>/dev/null || echo "Already removed"
@@ -43,7 +43,7 @@ rm SHAIL/.env 2>/dev/null || echo "Already removed"
 ### Step 3: Verify Settings Loading
 
 The `apps/shail/settings.py` file now correctly looks for `.env` at:
-- `/Users/reyhan/jarvis_master/.env` ✅
+- `/Users/reyhan/shail_master/.env` ✅
 
 It will NOT look in:
 - `SHAIL/.env` ❌
@@ -61,7 +61,7 @@ The path calculation in `settings.py`:
 To test that the correct .env is being loaded:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 python3 -c "
 from apps.shail.settings import get_settings
 settings = get_settings()

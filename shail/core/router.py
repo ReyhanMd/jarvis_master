@@ -3,7 +3,7 @@ import time
 from typing import Any
 from shail.core.types import TaskRequest, TaskResult, TaskStatus
 from shail.orchestration.master_planner import MasterPlanner
-from shail.orchestration.graph import SimpleGraphExecutor
+from shail.orchestration.graph import SimpleGraphExecutor, LangGraphExecutor
 from shail.agents.code import CodeAgent
 from shail.agents.bio import BioAgent
 from shail.agents.robo import RoboAgent
@@ -40,6 +40,8 @@ class ShailCoreRouter:
         self.mcp_provider = get_provider()
         self.mcp_client = MCPClient(provider=self.mcp_provider)
         self.rag_search = rag.search
+        self._min_interval_sec = 0.05  # simple throttle (20 rps)
+        self._last_task_time = 0.0
     
     def route(self, req: TaskRequest, task_id: str = None) -> TaskResult:
         """
@@ -58,6 +60,12 @@ class ShailCoreRouter:
             TaskResult with status, summary, and optional permission_request
         """
         start_time = time.time()
+        # Basic throttle to avoid overload
+        if self._last_task_time:
+            elapsed = start_time - self._last_task_time
+            if elapsed < self._min_interval_sec:
+                time.sleep(self._min_interval_sec - elapsed)
+        self._last_task_time = time.time()
         
         if task_id is None:
             task_id = str(uuid.uuid4())[:8]
@@ -92,7 +100,10 @@ class ShailCoreRouter:
             # This allows simple tasks to execute immediately without permission modals
             PermissionManager.add_approved_context(task_id)
             
-            executor = SimpleGraphExecutor(agent, task_id=task_id)
+            try:
+                executor = LangGraphExecutor(agent, task_id=task_id, persistent=True)
+            except Exception:
+                executor = SimpleGraphExecutor(agent, task_id=task_id)
             result = executor.run(req)
             execution_time = time.time() - execution_start
             

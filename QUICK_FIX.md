@@ -16,7 +16,7 @@ This means the `GEMINI_API_KEY` environment variable is not set.
 This is the best long-term solution. Create a `.env` file once and you're done:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # Copy the example file
 cp .env.example .env
@@ -30,7 +30,7 @@ python -m shail.workers.task_worker
 
 **OR use the helper script:**
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./start_worker.sh
 ```
 
@@ -39,7 +39,7 @@ cd /Users/reyhan/jarvis_master
 If you need a quick fix without creating .env file:
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # Set your Gemini API key (NOTE: Must be UPPERCASE: GEMINI_API_KEY)
 # The code looks for GEMINI_API_KEY, NOT gemini_api_key (lowercase)

@@ -1,0 +1,32 @@
+{
+  "graphs": [
+    {
+      "id": "shail-planner",
+      "entry": "services.planner.graph:create_planner_graph",
+      "description": "Shail planner graph with checkpointing and WebSocket streaming",
+      "env": {
+        "LANGGRAPH_ENV": "local"
+      }
+    },
+    {
+      "id": "shail-orchestration",
+      "entry": "shail.orchestration.graph:LangGraphExecutor",
+      "description": "LangGraph executor for Shail multi-agent orchestration",
+      "env": {
+        "LANGGRAPH_ENV": "local"
+      }
+    }
+  ],
+  "checkpoints": {
+    "type": "sqlite",
+    "path": "shail_memory.sqlite3"
+  },
+  "cloud": {
+    "enabled": false,
+    "notes": "Set LANGGRAPH_API_KEY and LANGGRAPH_PROJECT to enable cloud deployment.",
+    "env": {
+      "LANGGRAPH_API_KEY": "",
+      "LANGGRAPH_PROJECT": ""
+    }
+  }
+}

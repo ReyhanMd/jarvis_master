@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-sys.path.append("/Users/reyhan/jarvis_master")
+sys.path.append("/Users/reyhan/shail_master")
 
 # Mock dependencies
 sys.modules["langchain_google_genai"] = MagicMock()

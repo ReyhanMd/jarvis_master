@@ -31,12 +31,27 @@ from shail.core.types import TaskRequest, TaskResult, TaskStatus, ChatRequest, C
 from shail.safety.permission_manager import PermissionManager
 from shail.safety.exceptions import PermissionDenied
 from shail.utils.queue import TaskQueue
-from shail.memory.store import create_task, get_task, update_task_status, get_all_tasks
+from shail.memory.store import (
+    create_task,
+    get_task,
+    update_task_status,
+    get_all_tasks,
+    append_message,
+    get_chat_history,
+)
 from apps.shail.settings import get_settings
 from shail.integrations.register_all import register_all_tools
 from shail.integrations.mcp.provider import get_provider
 from apps.shail.websocket_server import websocket_endpoint, websocket_manager
+from apps.shail.native_health import register_native_health
 import uuid
+
+
+def ensure_log_dir():
+    """Ensure .cursor directory exists for debug logs"""
+    log_dir = os.path.join(os.path.expanduser("~"), "jarvis_master", ".cursor")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, "debug.log")
 
 
 class HealthResponse(BaseModel):
@@ -66,6 +81,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+register_native_health(app)
+
 router = ShailCoreRouter()
 logger = logging.getLogger(__name__)
 
@@ -92,7 +109,32 @@ async def websocket_brain(websocket: WebSocket):
     
     Clients connect to receive state updates as the planner executes tasks.
     """
-    await websocket_endpoint(websocket)
+    try:
+        # #region agent log
+        import json
+        import time
+        try:
+            log_path = ensure_log_dir()
+            with open(log_path, 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"main.py:websocket_brain","message":"WebSocket route called","data":{},"timestamp":time.time()})+'\n')
+        except Exception:
+            pass  # Don't fail WebSocket if logging fails
+        # #endregion
+        logger.info("WebSocket /ws/brain endpoint called")
+        await websocket_endpoint(websocket)
+    except Exception as e:
+        # #region agent log
+        import json
+        import time
+        try:
+            log_path = ensure_log_dir()
+            with open(log_path, 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"main.py:websocket_brain","message":"WebSocket route error","data":{"error":str(e)},"timestamp":time.time()})+'\n')
+        except Exception:
+            pass  # Don't fail WebSocket if logging fails
+        # #endregion
+        logger.error(f"WebSocket route error: {e}", exc_info=True)
+        raise
 
 
 @app.post("/tasks", response_model=TaskQueuedResponse, status_code=202)
@@ -105,24 +147,80 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
     
     Use GET /tasks/{task_id} to check status.
     """
+    # #region agent log
+    import json
+    import time
+    import sys
+    log_entry = {"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"main.py:submit_task","message":"Task submission received","data":{"text":req.text[:50],"desktop_id":req.desktop_id},"timestamp":time.time()}
+    print(f"🔍 [DEBUG] Task submission received: desktop_id={req.desktop_id}", file=sys.stderr)
+    try:
+        log_path = ensure_log_dir()
+        with open(log_path, 'a') as f:
+            f.write(json.dumps(log_entry)+'\n')
+            f.flush()
+    except Exception as e:
+        print(f"🔍 [DEBUG] Failed to write log: {e}", file=sys.stderr)
+    # #endregion
     try:
         # Generate task ID
         task_id = str(uuid.uuid4())[:8]
         
+        req_dict = req.dict()
+        # #region agent log
+        try:
+            log_path = ensure_log_dir()
+            with open(log_path, 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"main.py:submit_task","message":"Request dict created","data":{"desktop_id_in_dict":req_dict.get("desktop_id")},"timestamp":time.time()})+'\n')
+        except Exception:
+            pass  # Don't fail task submission if logging fails
+        # #endregion
+        
         # Store task in database
-        create_task(task_id, req.dict())
+        try:
+            create_task(task_id, req_dict)
+        except Exception as e:
+            logger.error(f"Failed to create task in database: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to store task: {str(e)}"
+            )
         
         # Queue task for worker processing
-        queue = TaskQueue()
-        queue.enqueue(task_id, req.dict())
+        try:
+            queue = TaskQueue()
+            queue.enqueue(task_id, req_dict)
+        except (ConnectionError, ImportError, RuntimeError, Exception) as e:
+            # Redis not available - log warning but don't fail
+            # Task is still stored in database, worker can poll database instead
+            error_msg = str(e)
+            error_msg = str(e)
+            logger.warning(f"Redis queue unavailable: {e}. Task {task_id} stored in database only.")
+            # #region agent log
+            try:
+                import json
+                import time
+                log_path = ensure_log_dir()
+                with open(log_path, 'a') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"main.py:submit_task","message":"Redis unavailable, task stored in DB only","data":{"task_id":task_id,"error":error_msg},"timestamp":time.time()})+'\n')
+            except Exception:
+                pass  # Don't fail if logging fails
+            # #endregion
+            # Still return success - task is in database, worker can poll
+            # Don't fail the request if Redis is down
         
         return TaskQueuedResponse(
             task_id=task_id,
             status="queued",
             message=f"Task {task_id} queued for processing"
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Task submission error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Task submission failed: {str(e)}"
+        )
 
 
 @app.get("/tasks/all")
@@ -158,6 +256,21 @@ def get_all_tasks_endpoint(limit: int = 100, offset: int = 0) -> List[Dict[str, 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/tasks/awaiting-approval")
+def get_tasks_awaiting_approval() -> List[Dict[str, Any]]:
+    """
+    Return tasks that are awaiting approval.
+    """
+    try:
+        tasks = get_all_tasks(limit=200, offset=0)
+        awaiting = []
+        for task in tasks:
+            if task.get("status") == "awaiting_approval":
+                awaiting.append(task)
+        return awaiting
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tasks/{task_id}", response_model=TaskResult)
 def get_task_status(task_id: str) -> TaskResult:
@@ -224,6 +337,28 @@ def get_task_status(task_id: str) -> TaskResult:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/tasks/{task_id}/results")
+def get_task_results(task_id: str) -> Dict[str, Any]:
+    """
+    Return detailed task results (raw stored payload).
+    """
+    try:
+        task_data = get_task(task_id)
+        if not task_data:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        result = task_data.get("result")
+        if result is None and task_data.get("result_json"):
+            result = task_data.get("result_json")
+        return {
+            "task_id": task_id,
+            "status": task_data.get("status"),
+            "result": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/tasks/{task_id}/approve", response_model=ApprovalResponse)
 def approve_task(task_id: str) -> ApprovalResponse:
@@ -316,6 +451,17 @@ async def get_permission_categories():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/chat/history", response_model=List[Dict[str, Any]])
+async def chat_history(limit: int = 200):
+    """
+    Return chat history from the local store.
+    """
+    try:
+        return get_chat_history(limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"History error: {str(e)}")
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """
@@ -371,9 +517,26 @@ async def chat(request: ChatRequest) -> ChatResponse:
                             }
                         })
         
-        # Create message and invoke LLM
+        # Create message and invoke LLM with timeout
+        import asyncio
         message = HumanMessage(content=content)
-        response = await llm.ainvoke([message])
+        try:
+            response = await asyncio.wait_for(
+                llm.ainvoke([message]),
+                timeout=60.0  # 60 seconds for LLM response
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="LLM response timeout. Please try again with a simpler query."
+            )
+
+        # Persist conversation
+        try:
+            append_message("user", request.text)
+            append_message("assistant", response.content)
+        except Exception:
+            logger.warning("Failed to append chat history")
         
         return ChatResponse(
             text=response.content,

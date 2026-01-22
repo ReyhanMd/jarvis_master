@@ -20,8 +20,10 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from shail.orchestration.master_planner import MasterPlanner
+from shail.orchestration.context_detector import ProjectContextDetector
 from shail.core.types import TaskRequest, RoutingDecision
 from apps.shail.settings import get_settings
+from shail.memory.rag import get_project_context_from_rag
 
 app = FastAPI(title="SHAIL Symbiotic Brain API", version="1.0.0")
 
@@ -91,6 +93,17 @@ def get_workflow_state():
             {"from": "sub1", "to": "tool1"}
         ]
     }
+
+
+@app.get("/context/project")
+def get_project_context(name: Optional[str] = None):
+    detector = ProjectContextDetector(brain.buffer)
+    project_name = name or detector.detect_active_project()
+    if not project_name:
+        return {"project": None, "context": []}
+    detector.persist_project_context(project_name)
+    context = get_project_context_from_rag(project_name)
+    return {"project": project_name, "context": context}
 
 if __name__ == "__main__":
     settings = get_settings()

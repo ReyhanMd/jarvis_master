@@ -55,20 +55,20 @@ redis-server
 
 First, create your `.env` file (if you haven't already):
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 cp .env.example .env
 # Then edit .env and add your GEMINI_API_KEY
 ```
 
 Then start the worker:
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 python -m shail.workers.task_worker
 ```
 
 **OR use the helper script:**
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 ./start_worker.sh
 ```
 
@@ -76,7 +76,7 @@ cd /Users/reyhan/jarvis_master
 
 If you prefer to export in terminal instead of using .env file:
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 
 # Set your Gemini API key (REQUIRED - must be UPPERCASE)
 export GEMINI_API_KEY="AIzaSyC0d1jFHVGBjLSrdq_8VhX8OtTH3uj4yOI"
@@ -108,7 +108,7 @@ python -m shail.workers.task_worker
 ### Terminal 3: Shail API (FastAPI)
 
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 uvicorn apps.shail.main:app --reload
 ```
 
@@ -130,7 +130,7 @@ INFO:     Application startup complete.
 ### Terminal 4: Shail UI (React)
 
 ```bash
-cd /Users/reyhan/jarvis_master/apps/shail-ui
+cd /Users/reyhan/shail_master/apps/shail-ui
 
 # First time only: Install dependencies
 npm install
@@ -232,7 +232,7 @@ sudo apt-get install redis-server  # Ubuntu/Debian
 
 **Solution:** Make sure you're in the project root and Python can find the modules:
 ```bash
-cd /Users/reyhan/jarvis_master
+cd /Users/reyhan/shail_master
 python -m shail.workers.task_worker
 ```
 

@@ -13,6 +13,7 @@ struct PermissionStatusView: View {
     @State private var screenRecordingStatus: PermissionStatus?
     @State private var accessibilityStatus: PermissionStatus?
     @State private var inputMonitoringStatus: PermissionStatus?
+    @State private var nativeHealth: NativeHealthStatus?
     
     var body: some View {
         HStack(spacing: 8) {
@@ -25,6 +26,23 @@ struct PermissionStatusView: View {
             if let inputMonitoring = inputMonitoringStatus {
                 PermissionBadge(status: inputMonitoring)
             }
+            if let health = nativeHealth {
+                PermissionBadge(
+                    status: PermissionStatus(
+                        name: "Grounding",
+                        isGranted: health.capture == "connected" && health.accessibility == "connected",
+                        settingsURL: nil
+                    )
+                )
+            }
+            Button(action: {
+                checkPermissions()
+            }) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .help("Refresh permission and connection status")
         }
         .onAppear {
             checkPermissions()
@@ -52,18 +70,17 @@ struct PermissionStatusView: View {
             isGranted: checkInputMonitoringPermission(),
             settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
         )
+
+        Task {
+            await checkNativeHealth()
+        }
     }
     
     private func checkScreenRecordingPermission() -> Bool {
-        // Check if we can capture screen
-        // This is a simplified check - actual permission might be more complex
         if #available(macOS 10.15, *) {
-            // ScreenCaptureKit requires explicit permission
-            // For now, we'll assume it's granted if CaptureService is running
-            // In production, you'd check CGPreflightScreenCaptureAccess()
-            return true // Placeholder - should check actual permission
+            return CGPreflightScreenCaptureAccess()
         }
-        return true
+        return CGPreflightScreenCaptureAccess()
     }
     
     private func checkAccessibilityPermission() -> Bool {
@@ -77,6 +94,22 @@ struct PermissionStatusView: View {
         // This is harder to check directly, so we'll try to use it and see if it works
         // For now, return true as a placeholder
         return true
+    }
+
+    private func checkNativeHealth() async {
+        guard let url = URL(string: "http://localhost:8000/health/native") else { return }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                return
+            }
+            let decoded = try JSONDecoder().decode(NativeHealthStatus.self, from: data)
+            await MainActor.run {
+                nativeHealth = decoded
+            }
+        } catch {
+            // ignore
+        }
     }
 }
 

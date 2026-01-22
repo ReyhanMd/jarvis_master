@@ -4,6 +4,7 @@ struct ChatOverlayView: View {
     @EnvironmentObject var coordinator: ViewCoordinator
     @State private var messageText: String = ""
     @State private var isLoading: Bool = false
+    @State private var showHistory: Bool = false
     
     var body: some View {
         VStack {
@@ -57,12 +58,22 @@ struct ChatOverlayView: View {
             
             // Navigation buttons
             HStack {
+                Button("History") {
+                    showHistory = true
+                }
+                .font(.caption)
+                
                 Button("Back to Popup") {
                     coordinator.showPopup()
                 }
                 .font(.caption)
                 
                 Spacer()
+                
+                Button("Collapse") {
+                    coordinator.collapseToLauncher?()
+                }
+                .font(.caption)
                 
             Button("View Workflow (Bird's Eye)") {
                 coordinator.showBirdsEye()
@@ -75,6 +86,10 @@ struct ChatOverlayView: View {
         .frame(width: 450)
         .background(VisualEffectBlur(material: .popover, blendingMode: .behindWindow))
         .cornerRadius(16)
+        .sheet(isPresented: $showHistory) {
+            ChatHistoryView()
+                .frame(minWidth: 500, minHeight: 400)
+        }
     }
     
     private func sendMessage() {

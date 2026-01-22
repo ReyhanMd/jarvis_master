@@ -71,8 +71,20 @@ class TaskWorker:
         print(f"[Worker] Processing task {task_id}: {request_data.get('text', '')[:50]}...")
         
         try:
+            # #region agent log
+            import json
+            import time
+            with open('/Users/reyhan/shail_master/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"task_worker.py:process_task","message":"Processing task from queue","data":{"task_id":task_id,"desktop_id":request_data.get("desktop_id")},"timestamp":time.time()})+'\n')
+            # #endregion
+            
             # Reconstruct TaskRequest
             request = TaskRequest(**request_data)
+            
+            # #region agent log
+            with open('/Users/reyhan/shail_master/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"task_worker.py:process_task","message":"TaskRequest created","data":{"task_id":task_id,"desktop_id":request.desktop_id},"timestamp":time.time()})+'\n')
+            # #endregion
             
             # Update status to running
             update_task_status(task_id, "running")

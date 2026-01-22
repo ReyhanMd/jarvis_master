@@ -24,6 +24,14 @@ fastmcp>=0.1.0
 psycopg2-binary>=2.9.9
 chromadb>=0.5.5
 
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# LangGraph
+langgraph>=0.2.0
+langgraph-checkpoint>=0.2.0
+
 # Desktop Control
 pynput>=1.7.6  # For mouse/keyboard control
 pyautogui>=0.9.54  # Alternative mouse/keyboard control

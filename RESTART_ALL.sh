@@ -5,7 +5,7 @@
 
 set -e  # Exit on error
 
-PROJECT_ROOT="/Users/reyhan/jarvis_master"
+PROJECT_ROOT="/Users/reyhan/shail_master"
 cd "$PROJECT_ROOT"
 
 echo "======================================"
