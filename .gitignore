@@ -63,6 +63,21 @@ apps/mac/*/.build/
 *.xcworkspace
 *.xcodeproj/xcuserdata/
 
+# Windows incompatible files
+*.pages
+*.command
+* *
+SHAIL WEBSITE LAUNCH DESIGN/
+=0.2.0
+
+# Embedded repositories (removed from tracking)
+Kimi-K2/
+fastmcp/
+langchain-academy/
+langgraph/
+mlx-lm/
+whisper/
+
 # Large binary files (Python extensions)
 *.so
 *.dylib
