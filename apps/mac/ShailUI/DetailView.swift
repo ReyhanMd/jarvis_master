@@ -50,7 +50,7 @@ struct DetailView: View {
             .padding(.trailing)
         }
         .padding()
-        .background(Color.blue)
+        .background(ShailTheme.primaryBlue)
     }
     
     @ViewBuilder

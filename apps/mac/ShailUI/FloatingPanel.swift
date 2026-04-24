@@ -2,25 +2,16 @@ import AppKit
 import SwiftUI
 
 final class FloatingPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool  { true }
     override var canBecomeMain: Bool { true }
-    
-    /// Enable click-through: accept first mouse click even when app is in background
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        return true
-    }
 }
 
-/// Custom NSVisualEffectView that accepts first mouse for click-through
+/// NSVisualEffectView that passes first-mouse clicks through to subviews.
 class ClickThroughVisualEffectView: NSVisualEffectView {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        return true
-    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// Custom NSHostingView that accepts first mouse for click-through
+/// NSHostingView that passes first-mouse clicks through to the SwiftUI hierarchy.
 class ClickThroughHostingView<Content: View>: NSHostingView<Content> {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        return true
-    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

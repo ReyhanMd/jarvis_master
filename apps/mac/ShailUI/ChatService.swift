@@ -7,7 +7,13 @@ class ChatService {
     private let baseURL = "http://localhost:8000"
     
     private init() {}
-    
+
+    private func authHeader() -> [String: String] {
+        let key = SettingsManager.shared.settings.apiKey
+        guard !key.isEmpty else { return [:] }
+        return ["Authorization": "Bearer \(key)"]
+    }
+
     /// Sends a chat message to the backend
     func sendMessage(_ text: String) async throws -> ChatResponse {
         guard let url = URL(string: "\(baseURL)/chat") else {
@@ -19,7 +25,8 @@ class ChatService {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+        authHeader().forEach { urlRequest.setValue($1, forHTTPHeaderField: $0) }
+
         do {
             urlRequest.httpBody = try JSONEncoder().encode(request)
         } catch {

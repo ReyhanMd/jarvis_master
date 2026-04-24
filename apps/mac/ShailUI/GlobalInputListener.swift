@@ -1,53 +1,49 @@
 import SwiftUI
 import AppKit
 
-/// Global hotkey listener for Option+S to toggle SHAIL panel
-/// Uses NSEvent global monitor (requires Input Monitoring permission)
+/// Listens for ⌘+Shift+S globally to toggle the SHAIL panel.
+/// Requires Input Monitoring permission (System Settings → Privacy & Security).
 class GlobalInputListener: ObservableObject {
-    private var eventMonitor: Any?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
     private var toggleCallback: (() -> Void)?
-    
-    /// Starts monitoring for Option+S hotkey
-    /// Note: Requires Input Monitoring permission in System Settings
+
     func startMonitoring(toggleCallback: @escaping () -> Void) {
         self.toggleCallback = toggleCallback
-        
-        // Use NSEvent global monitor (simpler and more reliable than Carbon API)
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            guard let self = self else { return }
-            
-            // Check for Option+S (Option modifier + S key)
-            // S key code is 1, Option modifier is .option
-            if event.modifierFlags.contains(.option) && event.keyCode == 1 {
-                DispatchQueue.main.async {
-                    self.toggleCallback?()
-                }
+
+        // Global monitor fires even when SHAIL is in background
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if self?.isShailHotkey(event) == true {
+                DispatchQueue.main.async { self?.toggleCallback?() }
             }
         }
-        
-        // Also monitor local events (for when app is active)
-        NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
-            if event.modifierFlags.contains(.option) && event.keyCode == 1 {
-                DispatchQueue.main.async {
-                    toggleCallback()
-                }
-                return nil // Consume the event
+
+        // Local monitor fires when SHAIL panel is frontmost
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if self?.isShailHotkey(event) == true {
+                DispatchQueue.main.async { self?.toggleCallback?() }
+                return nil // consume the event
             }
             return event
         }
     }
-    
-    /// Stops monitoring
+
     func stopMonitoring() {
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
-        }
+        if let monitor = globalMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = localMonitor  { NSEvent.removeMonitor(monitor) }
+        globalMonitor = nil
+        localMonitor  = nil
         toggleCallback = nil
     }
-    
-    deinit {
-        stopMonitoring()
+
+    deinit { stopMonitoring() }
+
+    // MARK: - Hotkey definition: ⌘ + Shift + S
+
+    private func isShailHotkey(_ event: NSEvent) -> Bool {
+        let required: NSEvent.ModifierFlags = [.command, .shift]
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // keyCode 1 = S key
+        return modifiers == required && event.keyCode == 1
     }
 }
-

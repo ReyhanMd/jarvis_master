@@ -19,7 +19,7 @@ class WindowManager: ObservableObject {
         let initialSize = sizeForMode(isLauncher: isLauncherMode)
         let panel = FloatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: initialSize.width, height: initialSize.height),
-            styleMask: [.nonactivatingPanel, .borderless],
+            styleMask: [.nonactivatingPanel, .borderless, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -55,6 +55,27 @@ class WindowManager: ObservableObject {
         self.panel = panel
     }
     
+    /// Shows the panel as the full QuickPopup (skips launcher bubble)
+    func showAsPopup() {
+        guard let panel = panel else { return }
+        isLauncherMode = false
+        panel.styleMask = [.borderless, .nonactivatingPanel, .resizable]
+        panel.setFrame(frameForMode(isLauncher: false), display: false)
+        setRootView(makeContentView())
+        panel.orderFront(nil)
+        isVisible = true
+    }
+
+    /// Expands panel to offline dashboard size and shows it
+    func showOfflineDashboard() {
+        guard let panel = panel else { return }
+        isLauncherMode = false
+        animatePanel(panel, to: frameForOfflineDashboard())
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        isVisible = true
+    }
+
     /// Shows the panel
     func show() {
         guard let panel = panel else { return }
@@ -88,22 +109,26 @@ class WindowManager: ObservableObject {
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
     
-    /// Expands launcher into chat overlay
+    /// Expands launcher to Quick Popup (View 1) — the default entry point
+    func expandToPopup() {
+        expand { [weak self] in self?.coordinator?.showPopup() }
+    }
+
+    /// Expands launcher directly to Chat Overlay (View 2) — used after a query is submitted
     func expandToChat() {
-        guard let panel = panel else { return }
-        guard isLauncherMode else { return }
-        
-        print("🔵 DEBUG: Expanding Window")
+        expand { [weak self] in self?.coordinator?.showChat() }
+    }
+
+    private func expand(then show: @escaping () -> Void) {
+        guard let panel = panel, isLauncherMode else { return }
         isLauncherMode = false
-        panel.styleMask = [.titled, .fullSizeContentView, .nonactivatingPanel]
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
+        // Keep borderless — .titled triggers SwiftUI safe-area constraint loops in NSPanel
+        panel.styleMask = [.borderless, .nonactivatingPanel, .resizable]
         animatePanel(panel, to: frameForMode(isLauncher: false))
         setRootView(makeContentView())
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        
-        coordinator?.showChat()
+        show()
     }
     
     /// Collapses chat overlay into launcher
@@ -126,7 +151,11 @@ class WindowManager: ObservableObject {
             )
         }
         if let coordinator = coordinator {
-            return AnyView(ContentView().environmentObject(coordinator))
+            return AnyView(
+                ContentView()
+                    .environmentObject(coordinator)
+                    .environmentObject(BackendManager.shared)
+            )
         }
         return AnyView(EmptyView())
     }
@@ -162,12 +191,24 @@ class WindowManager: ObservableObject {
             let size = sizeForMode(isLauncher: isLauncher)
             return NSRect(x: 0, y: 0, width: size.width, height: size.height)
         }
-        
+
         let screenRect = screen.visibleFrame
         let size = sizeForMode(isLauncher: isLauncher)
         let x = screenRect.maxX - size.width - 20
         let y = screenRect.minY + 20
         return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    private func frameForOfflineDashboard() -> NSRect {
+        guard let screen = NSScreen.main else {
+            return NSRect(x: 0, y: 0, width: 900, height: 600)
+        }
+        let screenRect = screen.visibleFrame
+        let width: CGFloat = 900
+        let height: CGFloat = 600
+        let x = screenRect.midX - width / 2
+        let y = screenRect.midY - height / 2
+        return NSRect(x: x, y: y, width: width, height: height)
     }
     
     private func positionPanel(_ panel: NSPanel) {

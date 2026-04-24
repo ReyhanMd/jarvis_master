@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct PermissionRequest: Identifiable, Codable, Equatable {
-    let id = UUID()
+    var id = UUID()
     let taskId: String
     let toolName: String
     let toolArgs: String

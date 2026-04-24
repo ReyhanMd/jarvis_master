@@ -1,5 +1,7 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import os
@@ -44,6 +46,10 @@ from shail.integrations.register_all import register_all_tools
 from shail.integrations.mcp.provider import get_provider
 from apps.shail.websocket_server import websocket_endpoint, websocket_manager
 from apps.shail.native_health import register_native_health
+from apps.shail.browser_api import browser_router
+from apps.shail.auth_api import auth_router
+from apps.shail.auth_store import init_auth_db
+from apps.shail.memory_dashboard_api import dashboard_router
 import uuid
 
 
@@ -82,6 +88,14 @@ app.add_middleware(
 )
 
 register_native_health(app)
+app.include_router(auth_router, prefix="/auth", tags=["auth"])
+app.include_router(browser_router, prefix="/browser", tags=["browser"])
+app.include_router(dashboard_router, prefix="/api/v2", tags=["dashboard"])
+
+# ── Serve shail-ui SPA at /dashboard ──────────────────────────────────────────
+_UI_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../apps/shail-ui/dist"))
+if os.path.isdir(_UI_DIST):
+    app.mount("/dashboard", StaticFiles(directory=_UI_DIST, html=True), name="shail-ui")
 
 router = ShailCoreRouter()
 logger = logging.getLogger(__name__)
@@ -90,6 +104,11 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 def bootstrap_mcp():
     """Register all tools with MCP on service startup."""
+    try:
+        init_auth_db()
+        logger.info("Auth DB initialized")
+    except Exception as exc:
+        logger.warning("Auth DB init failed: %s", exc)
     try:
         register_all_tools(get_provider())
         logger.info("MCP registration completed on startup")

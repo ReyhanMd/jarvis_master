@@ -35,4 +35,5 @@ struct ShailSettings: Codable {
     var appearance = AppearanceSettings()
     var advanced = AdvancedSettings()
     var native = NativeServicesSettings()
+    var apiKey: String = ""
 }

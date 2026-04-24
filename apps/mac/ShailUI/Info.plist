@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Bundle identifier resolved from build setting or hard-coded fallback -->
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+
+	<!-- Human-readable app name -->
+	<key>CFBundleName</key>
+	<string>ShailUI</string>
+
+	<!-- Executable name -->
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+
+	<!-- Versioning -->
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+
+	<!-- macOS target minimum (optional; typically set via build settings) -->
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+
+	<!-- Declare app is UI-presenting (not agent) -->
+	<key>LSBackgroundOnly</key>
+	<false/>
+
+	<!-- SwiftUI apps usually don’t need NSMainNibFile -->
+</dict>
+</plist>

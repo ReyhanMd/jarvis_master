@@ -19,6 +19,8 @@ let package = Package(
             path: ".",
             exclude: ["Preview Content"], // Exclude Xcode preview assets if any
             sources: [
+                "ShailTheme.swift",
+                "ShailStatusRing.swift",
                 "ShailApp.swift",
                 "ContentView.swift",
                 "ViewCoordinator.swift",
@@ -28,8 +30,13 @@ let package = Package(
                 "BirdsEyeView.swift",
                 "GraphWebView.swift",
                 "VisualEffectBlur.swift",
+                "FloatingPanel.swift",
                 "WindowManager.swift",
                 "GlobalInputListener.swift",
+                "LauncherModeView.swift",
+                "NativeHealthStatus.swift",
+                "VisionContextView.swift",
+                "ServiceLauncher.swift",
                 "PermissionStatusView.swift",
                 "ChatService.swift",
                 "BackendWebSocketClient.swift",
@@ -44,7 +51,10 @@ let package = Package(
                 "SettingsManager.swift",
                 "SettingsView.swift",
                 "DesktopManager.swift",
-                "DesktopListView.swift"
+                "DesktopListView.swift",
+                "BackendManager.swift",
+                "MockDataProvider.swift",
+                "OfflineDashboardView.swift"
             ],
             resources: [
                 .process("Resources")

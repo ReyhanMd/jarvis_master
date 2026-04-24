@@ -5,26 +5,33 @@ enum ShailViewMode {
     case chat
     case detail
     case birdsEye
+    case offlineDashboard
 }
 
 class ViewCoordinator: ObservableObject {
-    @Published var currentView: ShailViewMode = .popup
-    @Published var activeDesktop: String? = nil // For DetailView to know which "desktop" to show
-    @Published var lastChatResponse: String? = nil // Store last chat response
-    @Published var selectedNodeId: String? = nil // Selected node from graph
-    @Published var selectedNodeState: GraphState? = nil // State for selected node
-    @Published var activeTaskId: String? = nil // Task ID for result view
-    var collapseToLauncher: (() -> Void)? = nil
-    
+    @Published var currentView:       ShailViewMode  = .popup
+    @Published var messages:          [ChatMessage]  = []
+    @Published var lastChatResponse:  String?
+    @Published var activeDesktop:     String?
+    @Published var selectedNodeId:    String?
+    @Published var selectedNodeState: GraphState?
+    @Published var activeTaskId:      String?
+    @Published var hasError: Bool = false
+    var collapseToLauncher: (() -> Void)?
+    var expandToOfflineDashboard: (() -> Void)?
+    var hidePanel: (() -> Void)?
+    var openBirdsEyeWindow: (() -> Void)?
+    var resetToPopupSize: (() -> Void)?
+
     // Navigation functions
     func showPopup() {
         withAnimation { currentView = .popup }
     }
-    
+
     func showChat() {
         withAnimation { currentView = .chat }
     }
-    
+
     func showDetail(desktopId: String? = nil, nodeId: String? = nil) {
         if let desktopId = desktopId {
             activeDesktop = desktopId
@@ -34,8 +41,14 @@ class ViewCoordinator: ObservableObject {
         }
         withAnimation { currentView = .detail }
     }
-    
+
     func showBirdsEye() {
-        withAnimation { currentView = .birdsEye }
+        openBirdsEyeWindow?()
+    }
+
+    func showOfflineDashboard() {
+        hasError = true
+        expandToOfflineDashboard?()
+        withAnimation { currentView = .offlineDashboard }
     }
 }

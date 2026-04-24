@@ -18,6 +18,9 @@ struct ContentView: View {
             case .birdsEye:
                 BirdsEyeView()
                     .transition(.scale)
+            case .offlineDashboard:
+                OfflineDashboardView()
+                    .transition(.scale)
             }
         }
         .animation(.easeInOut, value: coordinator.currentView)
