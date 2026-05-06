@@ -112,6 +112,12 @@ services_env/
 # Caches and runtime
 .pytest_cache/
 run/
-graph.json
 shail_audit.jsonl
 logs/
+
+# Graphify generated architecture outputs
+graphify-out/
+graph.json
+graph.html
+GRAPH_REPORT.md
+old_graphs/
