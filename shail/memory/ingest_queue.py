@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -20,40 +21,65 @@ _QueueItem = Tuple[Any, Any]
 
 
 class IngestQueue:
-    """Single-consumer asyncio queue with background drain worker."""
+    """Single-consumer asyncio queue with background drain worker.
+
+    Thread-safe start():
+      - start() is callable from any thread/context
+      - Multiple concurrent calls produce ONE drain worker (lock-guarded)
+      - asyncio.Queue is bound to whichever loop first calls start()
+    """
 
     def __init__(self, max_size: int = 100) -> None:
-        self._q: asyncio.Queue[Optional[_QueueItem]] = asyncio.Queue(maxsize=max_size)
+        self._max_size: int = max_size
+        self._q: Optional[asyncio.Queue] = None  # lazy-init under start lock
         self._worker_task: Optional[asyncio.Task] = None
-        self._started = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._started: bool = False
+        self._start_lock = threading.Lock()  # cross-thread atomic start guard
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                             #
     # ------------------------------------------------------------------ #
 
     def start(self) -> None:
-        """Start background drain worker. Call once at app startup."""
+        """Start background drain worker. Idempotent and thread-safe.
+
+        Concurrent calls from multiple threads → exactly ONE worker is created.
+        """
+        # Fast path — no lock acquisition for the common case
         if self._started:
             return
-        self._started = True
-        try:
-            loop = asyncio.get_event_loop()
-            self._worker_task = loop.create_task(self._drain_loop())
-            logger.info("IngestQueue drain worker started")
-        except RuntimeError:
-            # No running loop yet — will start on first enqueue
-            pass
+        with self._start_lock:
+            if self._started:
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop in this thread — defer. First in-loop
+                # enqueue() will trigger start via run_coroutine_threadsafe.
+                logger.debug("IngestQueue.start: no running loop, deferring")
+                return
+            # Queue must be created under THIS loop to bind correctly
+            self._q = asyncio.Queue(maxsize=self._max_size)
+            self._loop = loop
+            self._worker_task = loop.create_task(self._drain_loop(), name="ingest-drain")
+            self._started = True
+            logger.info("IngestQueue drain worker started (loop=%s, max=%d)",
+                        id(loop), self._max_size)
 
     async def stop(self) -> None:
         """Graceful shutdown — drain remaining items then stop."""
-        if self._worker_task is None:
+        if self._worker_task is None or self._q is None:
             return
-        await self._q.put(None)  # sentinel
         try:
+            await self._q.put(None)  # sentinel
             await asyncio.wait_for(self._worker_task, timeout=10.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             self._worker_task.cancel()
-        self._started = False
+        finally:
+            with self._start_lock:
+                self._started = False
+                self._worker_task = None
         logger.info("IngestQueue stopped")
 
     # ------------------------------------------------------------------ #
@@ -61,9 +87,15 @@ class IngestQueue:
     # ------------------------------------------------------------------ #
 
     async def enqueue(self, result: Any, request: Any) -> bool:
-        """Enqueue (result, request) pair. Returns False if queue full."""
+        """Enqueue (result, request) pair. Returns False if queue full or no worker."""
+        # Lazy-start if needed. start() is itself thread-safe and idempotent.
         if not self._started:
             self.start()
+        if self._q is None:
+            # Still no loop available — silently drop. Caller already in async
+            # context could not have produced an unbound queue.
+            logger.debug("IngestQueue.enqueue: queue not bound to a loop — dropping")
+            return False
         try:
             self._q.put_nowait((result, request))
             return True
@@ -77,7 +109,7 @@ class IngestQueue:
 
     @property
     def qsize(self) -> int:
-        return self._q.qsize()
+        return self._q.qsize() if self._q is not None else 0
 
     # ------------------------------------------------------------------ #
     # Internal drain loop                                                   #

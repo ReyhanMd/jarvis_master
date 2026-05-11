@@ -182,6 +182,13 @@ def bootstrap_mcp():
         logger.info("MCP registration completed on startup")
     except Exception as exc:
         logger.warning("MCP registration failed: %s", exc)
+    # Runtime stabilization: register main event loop for thread-safe scheduling
+    try:
+        import asyncio
+        from shail.orchestration.graph import register_main_loop
+        register_main_loop(asyncio.get_event_loop())
+    except Exception as exc:
+        logger.warning("Main loop registration failed: %s", exc)
     # Phase 6: init metrics
     try:
         from shail.observability.metrics import init_metrics
@@ -194,6 +201,21 @@ def bootstrap_mcp():
         get_ingest_queue().start()
     except Exception as exc:
         logger.warning("IngestQueue start failed: %s", exc)
+
+
+@app.on_event("shutdown")
+async def _runtime_shutdown():
+    """Graceful shutdown — drain queues, close HTTP pools."""
+    try:
+        from shail.memory.ingest_queue import get_ingest_queue
+        await get_ingest_queue().stop()
+    except Exception as exc:
+        logger.warning("IngestQueue stop failed: %s", exc)
+    try:
+        from shail.memory.supermemory_client import close_supermemory_client
+        await close_supermemory_client()
+    except Exception as exc:
+        logger.warning("SupermemoryClient close failed: %s", exc)
 
 
 @app.get("/metrics", include_in_schema=False)
@@ -318,8 +340,9 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
         print(f"🔍 [DEBUG] Failed to write log: {e}", file=sys.stderr)
     # #endregion
     try:
-        # Generate task ID
-        task_id = str(uuid.uuid4())[:8]
+        # Generate task ID — full UUID4 to avoid birthday collisions on
+        # shared-context namespaces (Phase 5).
+        task_id = str(uuid.uuid4())
         
         req_dict = req.dict()
         # #region agent log

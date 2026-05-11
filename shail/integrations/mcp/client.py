@@ -19,14 +19,36 @@ except ImportError:
 
 
 def _run_coro(coro):
-    """Run an async coroutine from sync code."""
+    """Run an async coroutine from sync code — production-safe.
+
+    Three cases:
+      • No running loop          → asyncio.run() is safe (creates new loop)
+      • Running loop, same thread → run in dedicated worker thread w/ own loop
+      • Running loop, other thread → run_coroutine_threadsafe + .result()
+
+    Never calls asyncio.run() while inside a running loop (would crash).
+    Never returns a bare Future for sync caller to mishandle.
+    """
     try:
-        return asyncio.run(coro)
+        asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return asyncio.ensure_future(coro, loop=loop)
-        return loop.run_until_complete(coro)
+        # No loop in this thread → safe
+        return asyncio.run(coro)
+
+    # Running loop in this thread → must offload to thread to avoid nested run.
+    import threading
+    box: dict = {}
+    def _runner():
+        try:
+            box["value"] = asyncio.run(coro)
+        except BaseException as exc:
+            box["error"] = exc
+    t = threading.Thread(target=_runner, name="mcp-sync-bridge", daemon=True)
+    t.start()
+    t.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 class MCPClient:

@@ -9,9 +9,11 @@ Design rules:
 - All methods fail silently (log + return []) so caller is never disrupted.
 - Feature flag checked by CALLER (hybrid.py), not here.
 - Timeout is respected; never blocks the retrieval path.
+- Persistent httpx.AsyncClient: connection pool reused across all requests.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional
@@ -28,11 +30,21 @@ except ImportError:
 from shail.memory.retrieval_strategy import GlobalHit
 
 
+# Default connection pool tuning.
+_DEFAULT_MAX_CONNECTIONS           = 100
+_DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
+_DEFAULT_KEEPALIVE_EXPIRY_SEC      = 30.0
+
+
 class SupermemoryClient:
     """Async REST client for SuperMemory API.
 
-    Usage (injected into hybrid_search):
-        client = SupermemoryClient()
+    Maintains ONE persistent httpx.AsyncClient with connection pooling.
+    Use the module-level singleton `get_supermemory_client()` to share the
+    pool process-wide. Call `close()` at shutdown.
+
+    Usage:
+        client = get_supermemory_client()
         hits = await client.query_global(query="...", k=5, namespace="default")
     """
 
@@ -50,6 +62,47 @@ class SupermemoryClient:
         self._headers: Dict[str, str] = {"Content-Type": "application/json"}
         if self._api_key:
             self._headers["Authorization"] = f"Bearer {self._api_key}"
+
+        # Persistent client + init lock. Lazy creation — first request triggers
+        # client init under lock, subsequent requests reuse the pool.
+        self._client: Optional["httpx.AsyncClient"] = None
+        self._init_lock: Optional[asyncio.Lock] = None
+        self._closed = False
+
+    async def _get_client(self) -> "httpx.AsyncClient":
+        """Return persistent AsyncClient. Lazily initialized, lock-protected."""
+        if self._closed:
+            raise RuntimeError("SupermemoryClient is closed")
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        if self._client is not None and not self._client.is_closed:
+            return self._client
+        async with self._init_lock:
+            if self._client is not None and not self._client.is_closed:
+                return self._client
+            limits = httpx.Limits(
+                max_connections=_DEFAULT_MAX_CONNECTIONS,
+                max_keepalive_connections=_DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+                keepalive_expiry=_DEFAULT_KEEPALIVE_EXPIRY_SEC,
+            )
+            self._client = httpx.AsyncClient(
+                base_url=self._api_url,
+                headers=self._headers,
+                timeout=httpx.Timeout(self._timeout, connect=min(self._timeout, 3.0)),
+                limits=limits,
+            )
+            return self._client
+
+    async def close(self) -> None:
+        """Graceful shutdown — close pool, release connections. Idempotent."""
+        self._closed = True
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception as exc:
+                logger.debug("SupermemoryClient.close: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -79,16 +132,13 @@ class SupermemoryClient:
             payload["containerTag"] = namespace
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    f"{self._api_url}/v4/search",
-                    json=payload,
-                    headers=self._headers,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            client = await self._get_client()
+            resp = await client.post("/v4/search", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
         except httpx.TimeoutException:
-            logger.warning("SupermemoryClient: query_global timeout (%.1fs) for q=%r", self._timeout, query[:60])
+            logger.warning("SupermemoryClient: query_global timeout (%.1fs) for q=%r",
+                           self._timeout, query[:60])
             return []
         except Exception as exc:
             logger.warning("SupermemoryClient: query_global failed: %s", exc)
@@ -129,14 +179,15 @@ class SupermemoryClient:
             payload["customId"] = "shail-" + hashlib.sha256(content.encode()).hexdigest()[:16]
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout * 2) as client:
-                resp = await client.post(
-                    f"{self._api_url}/v3/documents",
-                    json=payload,
-                    headers=self._headers,
-                )
-                resp.raise_for_status()
-                return resp.json().get("id")
+            client = await self._get_client()
+            # Ingest can be slow — extend timeout for this call only
+            resp = await client.post(
+                "/v3/documents",
+                json=payload,
+                timeout=httpx.Timeout(self._timeout * 2),
+            )
+            resp.raise_for_status()
+            return resp.json().get("id")
         except Exception as exc:
             logger.warning("SupermemoryClient: ingest_global failed: %s", exc)
             return None
@@ -146,12 +197,9 @@ class SupermemoryClient:
         if not _HTTPX_AVAILABLE:
             return False
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(
-                    f"{self._api_url}/health",
-                    headers=self._headers,
-                )
-                return resp.status_code < 500
+            client = await self._get_client()
+            resp = await client.get("/health", timeout=httpx.Timeout(3.0))
+            return resp.status_code < 500
         except Exception:
             return False
 
@@ -160,13 +208,10 @@ class SupermemoryClient:
         if not _HTTPX_AVAILABLE:
             return {}
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    f"{self._api_url}/v3/analytics/usage",
-                    headers=self._headers,
-                )
-                resp.raise_for_status()
-                return resp.json()
+            client = await self._get_client()
+            resp = await client.get("/v3/analytics/usage", timeout=httpx.Timeout(5.0))
+            resp.raise_for_status()
+            return resp.json()
         except Exception as exc:
             logger.warning("SupermemoryClient: get_stats failed: %s", exc)
             return {}
@@ -206,3 +251,13 @@ def get_supermemory_client() -> SupermemoryClient:
     if _client is None:
         _client = SupermemoryClient()
     return _client
+
+
+async def close_supermemory_client() -> None:
+    """Graceful shutdown — call from FastAPI shutdown handler."""
+    global _client
+    if _client is not None:
+        try:
+            await _client.close()
+        finally:
+            _client = None

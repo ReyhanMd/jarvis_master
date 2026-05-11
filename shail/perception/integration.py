@@ -27,7 +27,11 @@ class PerceptionServiceConnector:
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 30.0
         self._lock = asyncio.Lock()
-        self._frame_dir = "/Users/reyhan/jarvis_master/logs/grounding_frames"
+        import os
+        self._frame_dir = os.environ.get(
+            "SHAIL_GROUNDING_FRAMES_DIR",
+            os.path.expanduser("~/Library/Application Support/SHAIL/logs/grounding_frames"),
+        )
 
     async def connect_all(self):
         await asyncio.gather(self._ensure_ax(), self._ensure_capture())

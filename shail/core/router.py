@@ -21,7 +21,16 @@ from shail.integrations.mcp.client import MCPClient
 
 
 def _maybe_enqueue_ingest(result, req) -> None:
-    """Phase 3: fire-and-forget auto-ingest. Never raises."""
+    """Phase 3: fire-and-forget auto-ingest. Never raises.
+
+    Thread-safe across all caller contexts:
+      • Running loop in this thread → schedule task on it
+      • FastAPI threadpool (sync route) → run_coroutine_threadsafe on main loop
+      • Pure sync (tests, CLI) → no loop available → drop silently
+
+    Never uses asyncio.ensure_future() from cross-thread (NOT thread-safe).
+    Never uses asyncio.run() (would crash under FastAPI).
+    """
     try:
         from apps.shail.settings import get_settings
         if not get_settings().ingest_generated_outputs:
@@ -29,13 +38,32 @@ def _maybe_enqueue_ingest(result, req) -> None:
         import asyncio
         from shail.memory.ingest_queue import get_ingest_queue
         q = get_ingest_queue()
-        # asyncio.ensure_future works when an event loop is running (FastAPI).
-        # In sync contexts (tests) we silently skip rather than block.
+        coro = q.enqueue(result, req)
+
+        # Case 1: running loop in THIS thread
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(q.enqueue(result, req))
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+            return
         except RuntimeError:
+            pass
+
+        # Case 2: main loop on ANOTHER thread (FastAPI threadpool case)
+        try:
+            from shail.orchestration.graph import _get_main_loop
+            main_loop = _get_main_loop()
+            if main_loop is not None and main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(coro, main_loop)
+                return
+        except Exception:
+            pass
+
+        # Case 3: no loop anywhere — drop. Test/CLI context.
+        # We cannot await coro here without blocking the sync caller.
+        # Close it cleanly to avoid "coroutine was never awaited" warnings.
+        try:
+            coro.close()
+        except Exception:
             pass
     except Exception as exc:
         import logging
@@ -90,7 +118,9 @@ class ShailCoreRouter:
         self._last_task_time = time.time()
         
         if task_id is None:
-            task_id = str(uuid.uuid4())[:8]
+            # Full UUID4 (36 chars) — 8-char truncation caused birthday collisions
+            # at ~65K tasks, which polluted shared-context namespaces.
+            task_id = str(uuid.uuid4())
         
         try:
             # Step 1: Routing decision — classifier first, master planner as fallback

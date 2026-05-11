@@ -25,6 +25,58 @@ except:
     pass
 
 
+def _safe_broadcast(ws_manager, state) -> None:
+    """Thread-safe, loop-safe WebSocket state broadcast.
+
+    Tolerates THREE caller contexts without ever raising:
+      1. No event loop running       → asyncio.run() inline
+      2. Running loop in this thread → schedule task on running loop
+      3. Running loop on OTHER thread → use run_coroutine_threadsafe
+
+    Never crashes the calling path. Errors logged and swallowed.
+    """
+    if not ws_manager:
+        return
+    coro = ws_manager.broadcast_state(state)
+    try:
+        loop = asyncio.get_running_loop()
+        # Running loop in THIS thread → schedule onto it
+        loop.create_task(coro)
+        return
+    except RuntimeError:
+        pass
+    # No loop in this thread. Two possibilities:
+    #   (a) No loop anywhere → asyncio.run is safe
+    #   (b) Loop exists on another thread → must use run_coroutine_threadsafe
+    main_loop = _get_main_loop()
+    if main_loop is not None and main_loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(coro, main_loop)
+            return
+        except Exception as exc:
+            if logger:
+                logger.debug("_safe_broadcast threadsafe schedule failed: %s", exc)
+    try:
+        asyncio.run(coro)
+    except Exception as exc:
+        if logger:
+            logger.debug("_safe_broadcast asyncio.run failed: %s", exc)
+
+
+# Module-level main-loop registry, set at FastAPI startup.
+_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def register_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Called once at app startup to register the uvicorn event loop."""
+    global _MAIN_LOOP
+    _MAIN_LOOP = loop
+
+
+def _get_main_loop() -> Optional[asyncio.AbstractEventLoop]:
+    return _MAIN_LOOP
+
+
 class LangGraphExecutor:
     """
     LangGraph-based executor for stateful workflows and multi-agent orchestration.
@@ -169,11 +221,9 @@ class LangGraphExecutor:
             start_time = time.time()
             settings = get_settings()
             desktop_id = getattr(req, "desktop_id", None)
-            # #region agent log
-            import json
-            with open('/Users/reyhan/shail_master/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"H","location":"graph.py:run","message":"Creating initial state","data":{"desktop_id":desktop_id,"task_id":self.task_id},"timestamp":time.time()})+'\n')
-            # #endregion
+            if logger:
+                logger.debug("graph.py:run creating initial state task_id=%s desktop_id=%s",
+                             self.task_id, desktop_id)
             # Phase 5: shared context namespace
             _mode = getattr(req, "mode", None) or "default"
             initial_state = {
@@ -201,38 +251,24 @@ class LangGraphExecutor:
                 "recovery_attempts": 0,
                 "permission_requests": [],
             }
-            # #region agent log
-            with open('/Users/reyhan/shail_master/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"H","location":"graph.py:run","message":"Initial state created","data":{"desktop_id_in_state":initial_state.get("desktop_id")},"timestamp":time.time()})+'\n')
-            # #endregion
+            if logger:
+                logger.debug("graph.py:run initial_state ready desktop_id=%s",
+                             initial_state.get("desktop_id"))
 
             config = {"configurable": {"thread_id": self.task_id}}
             result_state = None
-            
-            # Use streaming for incremental updates
+
+            # Use streaming for incremental updates.
+            # _run_streaming_sync handles BOTH cases (running loop / no loop) internally.
             try:
-                # Check if we're in an async context
-                try:
-                    loop = asyncio.get_running_loop()
-                    # We're in async context - schedule streaming task
-                    # Note: This method is called from sync context, so we use sync streaming
-                    # For true async, the caller should use run_async() method
-                    result_state = self._run_streaming_sync(graph, initial_state, config)
-                except RuntimeError:
-                    # No event loop running - use sync streaming
-                    result_state = self._run_streaming_sync(graph, initial_state, config)
+                result_state = self._run_streaming_sync(graph, initial_state, config)
             except Exception as e:
                 if logger:
                     logger.error(f"Streaming failed, falling back to invoke: {e}")
                 # Fallback to non-streaming
                 result_state = graph.invoke(initial_state, config=config)
-                if brain_ws_manager:
-                    try:
-                        asyncio.run(brain_ws_manager.broadcast_state(result_state))
-                    except RuntimeError:
-                        loop = asyncio.get_event_loop()
-                        loop.create_task(brain_ws_manager.broadcast_state(result_state))
-            
+                _safe_broadcast(brain_ws_manager, result_state)
+
             if result_state:
                 result_state["metrics"] = {
                     "duration_ms": (time.time() - start_time) * 1000,
@@ -240,61 +276,54 @@ class LangGraphExecutor:
                     "tool_calls": len(result_state.get("tool_history", [])),
                 }
                 # Final state broadcast
-                if brain_ws_manager:
-                    try:
-                        asyncio.run(brain_ws_manager.broadcast_state(result_state))
-                    except RuntimeError:
-                        loop = asyncio.get_event_loop()
-                        loop.create_task(brain_ws_manager.broadcast_state(result_state))
+                _safe_broadcast(brain_ws_manager, result_state)
                 return self._convert_langgraph_result(result_state)
         
         # Fall back to SimpleGraphExecutor
         return SimpleGraphExecutor(self.agent, self.task_id).run(req)
     
     def _run_streaming_sync(self, graph, initial_state, config):
-        """Run graph with streaming in sync context."""
+        """Run graph with streaming.
+
+        Production-safe across all caller contexts:
+          • Sync caller, NO running loop      → asyncio.run() in this thread
+          • Sync caller, RUNNING loop (FastAPI threadpool) → run in dedicated
+            worker thread with its own loop, blocking the caller until done
+          • Direct async caller              → use run_async() instead
+
+        Never calls asyncio.run() from inside a running loop (would crash).
+        """
+        coro_factory = lambda: self._stream_and_collect(graph, initial_state, config)
+
+        try:
+            asyncio.get_running_loop()
+            running = True
+        except RuntimeError:
+            running = False
+
+        if not running:
+            return asyncio.run(coro_factory())
+
+        # Running loop in current thread → offload to worker thread with own loop.
+        import threading
+        box: dict = {}
+        def _runner():
+            try:
+                box["value"] = asyncio.run(coro_factory())
+            except BaseException as exc:
+                box["error"] = exc
+        t = threading.Thread(target=_runner, name="langgraph-stream", daemon=True)
+        t.start()
+        t.join()
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    async def _stream_and_collect(self, graph, initial_state, config):
+        """Drain LangGraph astream + broadcast events. Async-native; safe."""
         result_state = None
-        
-        # Use astream for incremental updates
-        async def stream_and_collect():
-            nonlocal result_state
-            async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
-                # event is a dict with node names as keys and state updates as values
-                for node_name, state_update in event.items():
-                    # Broadcast incremental state update
-                    if brain_ws_manager:
-                        try:
-                            await brain_ws_manager.broadcast_event("node_update", {
-                                "node": node_name,
-                                "state": state_update,
-                            })
-                        except Exception as e:
-                            if logger:
-                                logger.warning(f"Failed to broadcast node update: {e}")
-                    
-                    # Track latest state
-                    if result_state is None:
-                        result_state = state_update.copy()
-                    else:
-                        result_state.update(state_update)
-            
-            # Get final state
-            if result_state is None:
-                result_state = await graph.ainvoke(initial_state, config=config)
-            return result_state
-        
-        # Run async function in sync context
-        result_state = asyncio.run(stream_and_collect())
-        return result_state
-    
-    async def _run_streaming_async(self, graph, initial_state, config, loop):
-        """Run graph with streaming in async context."""
-        result_state = None
-        
         async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
-            # event is a dict with node names as keys and state updates as values
             for node_name, state_update in event.items():
-                # Broadcast incremental state update
                 if brain_ws_manager:
                     try:
                         await brain_ws_manager.broadcast_event("node_update", {
@@ -304,17 +333,12 @@ class LangGraphExecutor:
                     except Exception as e:
                         if logger:
                             logger.warning(f"Failed to broadcast node update: {e}")
-                
-                # Track latest state
                 if result_state is None:
                     result_state = state_update.copy()
                 else:
                     result_state.update(state_update)
-        
-        # Get final state if not collected
         if result_state is None:
             result_state = await graph.ainvoke(initial_state, config=config)
-        
         return result_state
     
     def _convert_langgraph_result(self, result: Dict[str, Any]) -> TaskResult:
