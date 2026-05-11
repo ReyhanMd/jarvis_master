@@ -97,6 +97,7 @@ async def hybrid_search(
     overfetch_k: int = DEFAULT_OVERFETCH,
     use_global_memory: bool = False,      # Phase 1: SuperMemory global fallback
     retrieval_strategy: str = "local_only",  # local_only | global_only | hybrid
+    task_id: Optional[str] = None,         # Sprint 2: usefulness feedback registry
 ) -> List[SemanticHit]:
     """Drop-in replacement for `rag.search` + `_apply_time_decay`.
 
@@ -111,6 +112,9 @@ async def hybrid_search(
     """
     if not query or not query.strip():
         return []
+
+    import time as _t
+    _retrieval_start = _t.perf_counter()
 
     plan = classify(query)
     settings = get_settings()
@@ -181,6 +185,10 @@ async def hybrid_search(
             logger.warning("hybrid_search: global fallback failed: %s", exc)
             global_hits = None
 
+    # Sprint 2: RRF mode by default; legacy weighted available via settings flag.
+    fusion_mode = getattr(settings, "fusion_mode", "rrf")
+    import time as _time
+    _fuse_start = _time.perf_counter()
     fused = fusion.fuse(
         exact=exact_hits,
         semantic=semantic_hits,
@@ -188,8 +196,10 @@ async def hybrid_search(
         k=k,
         fts_threshold=DEFAULT_FTS_THRESHOLD,
         semantic_threshold=DEFAULT_SEMANTIC_THRESHOLD,
-        global_hits=global_hits,           # Phase 1
+        global_hits=global_hits,
+        mode=fusion_mode,
     )
+    telemetry.observe("memory.fusion_seconds", _time.perf_counter() - _fuse_start)
 
     # Telemetry: which path each hit came from.
     for h in fused:
@@ -199,16 +209,32 @@ async def hybrid_search(
 
     if settings.shail_retrieval_debug:
         logger.info(
-            "hybrid_search q=%r intent=%s exact=%d sem=%d global=%d fused=%d top=%s strategy=%s",
+            "hybrid_search q=%r intent=%s exact=%d sem=%d global=%d fused=%d top=%s strategy=%s mode=%s",
             query, plan.intent.value,
             len(exact_hits), len(semantic_hits),
             len(global_hits) if global_hits else 0,
             len(fused),
             (fused[0].surface, round(fused[0].score, 3)) if fused else None,
-            effective_strategy,
+            effective_strategy, fusion_mode,
         )
 
     result = [h.as_tuple() for h in fused]
+
+    # ── Sprint 2: usefulness reranking (cheap; weighted boost) ──
+    if getattr(settings, "usefulness_reranking_enabled", True) and result:
+        try:
+            from shail.memory.usefulness import apply_usefulness_boost
+            result = apply_usefulness_boost(result, boost_weight=0.15)
+        except Exception as exc:
+            logger.debug("hybrid_search: usefulness rerank failed: %s", exc)
+
+    # ── Sprint 2: register retrieved memories for post-task feedback ──
+    if task_id and result:
+        try:
+            from shail.memory.usefulness import record_retrieval
+            record_retrieval(task_id, result)
+        except Exception as exc:
+            logger.debug("hybrid_search: record_retrieval failed: %s", exc)
 
     # ── Phase 2: Cache store ──
     if settings.cache_enabled and result:
@@ -216,5 +242,12 @@ async def hybrid_search(
             await cache.set(query, namespace, k, result)
         except Exception as exc:
             logger.debug("hybrid_search: cache write failed: %s", exc)
+
+    # Latency histogram, labelled by chosen strategy
+    telemetry.observe(
+        telemetry.RETRIEVAL_LATENCY_MS,
+        (_t.perf_counter() - _retrieval_start) * 1000.0,
+        path=effective_strategy,
+    )
 
     return result

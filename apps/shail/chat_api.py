@@ -397,9 +397,13 @@ async def _fetch_mcp_sources(user_id: str, query: str) -> list[MCPCitation]:
 
 async def _build_context(
     user_id: str, query: str, *, is_first_in_session: bool,
+    task_id: Optional[str] = None,
 ) -> tuple[str, list[MemoryCitation], list[PastChatCitation], list[WebSourceOut], list[MCPCitation]]:
     """Run all retrieval sources in parallel; combine into a single context
     block plus structured citation lists.
+
+    `task_id` (Sprint 2): if provided, retrieved memories are registered for
+    usefulness feedback after the task completes.
     """
     namespace = f"user_{user_id}"
 
@@ -413,6 +417,7 @@ async def _build_context(
                 return await _hybrid_search(
                     query, namespace=namespace,
                     k=RAG_K, overfetch_k=RAG_K_OVERFETCH,
+                    task_id=task_id,
                 )
             except Exception as e:
                 logger.warning("hybrid_search failed; falling back to legacy rag: %s", e)
@@ -639,9 +644,11 @@ async def chat(
         session_id, user_id, role="user", content=req.message,
     )
 
-    # Build the unified RAG context
+    # Build the unified RAG context — pass session_id as task_id so retrieved
+    # memories get registered for post-response usefulness feedback.
     context, citations, past_chats, web_sources, mcp_sources = await _build_context(
         user_id, req.message, is_first_in_session=is_first,
+        task_id=session_id,
     )
 
     # Reload prior thread for the LLM
@@ -788,8 +795,21 @@ def _schedule_post_reply(
     user_msg: dict, assistant_msg: dict,
     session_title: str, is_first: bool,
 ) -> None:
-    """Fire post-reply background tasks: past-chat indexing + autotitle."""
+    """Fire post-reply background tasks: past-chat indexing + autotitle +
+    Sprint 2 usefulness feedback for retrieved memories."""
     async def _run():
+        # Sprint 2: usefulness feedback. Evaluates which retrieved memories
+        # actually appear in the assistant response. Cheap lexical heuristic.
+        try:
+            from shail.memory.usefulness import evaluate_task
+            evaluate_task(
+                session_id,
+                assistant_msg.get("content", ""),
+                success=True,    # chat response generated == success
+                retry_count=0,
+            )
+        except Exception as e:
+            logger.debug("usefulness eval failed: %s", e)
         try:
             _index_past_chat_turn(
                 user_id=user_id, session_id=session_id,

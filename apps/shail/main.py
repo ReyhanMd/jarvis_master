@@ -189,10 +189,12 @@ def bootstrap_mcp():
         register_main_loop(asyncio.get_event_loop())
     except Exception as exc:
         logger.warning("Main loop registration failed: %s", exc)
-    # Phase 6: init metrics
+    # Phase 6: init metrics + Sprint 2 telemetry→Prometheus bridge
     try:
         from shail.observability.metrics import init_metrics
         init_metrics()
+        from shail.observability.bridge import install_bridge
+        install_bridge()
     except Exception as exc:
         logger.warning("Metrics init failed: %s", exc)
     # Phase 3: start ingest queue drain worker

@@ -100,6 +100,9 @@ def _stable_key_for_semantic(meta: dict, content: str) -> str:
     return "sem:" + hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:12]
 
 
+RRF_K = 60  # Standard Reciprocal Rank Fusion constant (Cormack et al. 2009)
+
+
 def fuse(
     exact: Iterable[ExactHit],
     semantic: Iterable[SemanticHit],
@@ -108,91 +111,121 @@ def fuse(
     k: int = 6,
     fts_threshold: float = 0.0,
     semantic_threshold: float = 0.0,
-    global_hits: Optional[Iterable] = None,   # List[GlobalHit] — Phase 1
+    global_hits: Optional[Iterable] = None,
     global_threshold: float = 0.0,
+    mode: str = "rrf",   # "rrf" (default, Sprint 2) | "weighted" (legacy)
 ) -> List[FusedHit]:
-    """Merge exact + semantic hits into a single ranked list.
+    """Merge exact + semantic + (optional) global hits into a single ranked list.
 
-    Both inputs are lazy-iterable; consumed once. `k` is the final cap.
-    Hits below their respective thresholds are dropped before fusion.
+    Two ranking modes (selected via `mode`):
+
+      "rrf"      — Reciprocal Rank Fusion. Each surface produces an internal
+                   rank; an item appearing at rank r in surface S contributes
+                   `w_S / (RRF_K + r)`. Items in multiple surfaces sum
+                   contributions. Scale-independent and deterministic.
+
+      "weighted" — Legacy mode. Sums weighted RAW scores across surfaces.
+                   Kept for backward compatibility. Vulnerable to score-scale
+                   mismatch between surfaces.
+
+    Default: RRF. Tests assert deterministic ranking.
     """
-    w_exact = float(weights.get("exact", 0.5))
-    w_sem   = float(weights.get("semantic", 0.5))
+    # Coerce iterables to lists — we need ranks
+    exact_list = [h for h in exact if h.score >= fts_threshold]
+    sem_list   = [(c, s, m) for c, s, m in semantic if float(s or 0.0) >= semantic_threshold]
+    global_list: list = []
+    if global_hits is not None and _GlobalHit is not None:
+        for gh in global_hits:
+            if isinstance(gh, _GlobalHit) and float(gh.score or 0.0) >= global_threshold:
+                global_list.append(gh)
+
+    # Sort each surface by raw score (desc) to determine intra-surface ranks
+    exact_list.sort(key=lambda h: h.score, reverse=True)
+    sem_list.sort(key=lambda t: float(t[1] or 0.0), reverse=True)
+    global_list.sort(key=lambda gh: float(gh.score or 0.0), reverse=True)
+
+    w_exact  = float(weights.get("exact",    0.5))
+    w_sem    = float(weights.get("semantic", 0.5))
+    w_global = float(weights.get("global",   w_sem))
 
     out: dict[str, FusedHit] = {}
 
-    # ── Exact contributions ──
-    for h in exact:
-        if h.score < fts_threshold:
-            continue
+    def _contrib_rrf(rank: int, weight: float) -> float:
+        return weight / (RRF_K + rank)
+
+    def _contrib_weighted(raw: float, weight: float) -> float:
+        return weight * raw
+
+    contrib = _contrib_rrf if mode == "rrf" else _contrib_weighted
+
+    # ── Exact ────────────────────────────────────────────────────────── #
+    for rank_idx, h in enumerate(exact_list, start=1):
         key = h.memory_id or h.fact_id
-        contribution = w_exact * float(h.score)
+        c = contrib(rank_idx if mode == "rrf" else float(h.score), w_exact)
         if key in out:
-            f = out[key]
-            f.score += contribution
-            f.surface = "fused"
-            f.raw_scores["exact"] = float(h.score)
+            existing = out[key]
+            existing.score += c
+            existing.surface = "fused"
+            existing.raw_scores["exact"] = float(h.score)
+            existing.raw_scores["exact_rank"] = rank_idx
         else:
             out[key] = FusedHit(
                 memory_id=key,
-                score=contribution,
+                score=c,
                 surface="exact",
                 content=_format_exact_hit(h),
                 metadata=_exact_metadata(h),
-                raw_scores={"exact": float(h.score)},
+                raw_scores={"exact": float(h.score), "exact_rank": rank_idx},
             )
 
-    # ── Semantic contributions ──
-    for content, sem_score, meta in semantic:
-        s = float(sem_score or 0.0)
-        if s < semantic_threshold:
-            continue
+    # ── Semantic ─────────────────────────────────────────────────────── #
+    for rank_idx, (content, s, meta) in enumerate(sem_list, start=1):
+        raw = float(s or 0.0)
         key = _stable_key_for_semantic(meta or {}, content or "")
-        contribution = w_sem * s
+        c = contrib(rank_idx if mode == "rrf" else raw, w_sem)
         if key in out:
-            f = out[key]
-            f.score += contribution
-            f.surface = "fused"
-            f.raw_scores["semantic"] = s
+            existing = out[key]
+            existing.score += c
+            existing.surface = "fused"
+            existing.raw_scores["semantic"] = raw
+            existing.raw_scores["semantic_rank"] = rank_idx
         else:
             md = dict(meta or {})
             md.setdefault("surface", "semantic")
             out[key] = FusedHit(
                 memory_id=key,
-                score=contribution,
+                score=c,
                 surface="semantic",
                 content=content or "",
                 metadata=md,
-                raw_scores={"semantic": s},
+                raw_scores={"semantic": raw, "semantic_rank": rank_idx},
             )
 
-    # ── Global contributions (SuperMemory Phase 1) ──
-    if global_hits is not None and _GlobalHit is not None:
-        w_global = float(weights.get("global", w_sem))  # fallback to semantic weight
-        for gh in global_hits:
-            if not isinstance(gh, _GlobalHit):
-                continue
-            s = float(gh.score or 0.0)
-            if s < global_threshold:
-                continue
-            key = gh.memory_id or ("global:" + hashlib.sha256((gh.content or "").encode()).hexdigest()[:12])
-            contribution = w_global * s
-            if key in out:
-                f = out[key]
-                f.score += contribution
-                f.surface = "fused"
-                f.raw_scores["global"] = s
-            else:
-                meta = dict(gh.metadata or {})
-                meta.setdefault("surface", "global")
-                out[key] = FusedHit(
-                    memory_id=key,
-                    score=contribution,
-                    surface="global",
-                    content=gh.content or "",
-                    metadata=meta,
-                    raw_scores={"global": s},
-                )
+    # ── Global (SuperMemory) ─────────────────────────────────────────── #
+    for rank_idx, gh in enumerate(global_list, start=1):
+        raw = float(gh.score or 0.0)
+        key = gh.memory_id or (
+            "global:" + hashlib.sha256((gh.content or "").encode()).hexdigest()[:12]
+        )
+        c = contrib(rank_idx if mode == "rrf" else raw, w_global)
+        if key in out:
+            existing = out[key]
+            existing.score += c
+            existing.surface = "fused"
+            existing.raw_scores["global"] = raw
+            existing.raw_scores["global_rank"] = rank_idx
+        else:
+            meta = dict(gh.metadata or {})
+            meta.setdefault("surface", "global")
+            out[key] = FusedHit(
+                memory_id=key,
+                score=c,
+                surface="global",
+                content=gh.content or "",
+                metadata=meta,
+                raw_scores={"global": raw, "global_rank": rank_idx},
+            )
 
-    ranked = sorted(out.values(), key=lambda f: f.score, reverse=True)
+    # Final ordering — score desc, then memory_id for determinism
+    ranked = sorted(out.values(), key=lambda f: (-f.score, f.memory_id))
     return ranked[: max(0, int(k))]

@@ -152,6 +152,21 @@ class Settings(BaseModel):
     taxonomy_enabled:                 bool  = Field(default=os.getenv("SHAIL_TAXONOMY_ENABLED", "true").lower() == "true")
     taxonomy_config_path:             str   = Field(default=os.getenv("SHAIL_TAXONOMY_CONFIG", os.path.expanduser("~/.config/SHAIL/taxonomy.json")))
 
+    # ── Sprint 2: Memory Reliability ────────────────────────────────────
+    # Fusion mode: "rrf" (Reciprocal Rank Fusion, scale-independent) or "weighted" (legacy)
+    fusion_mode:                      str   = Field(default=os.getenv("SHAIL_FUSION_MODE", "rrf"))
+    # Semantic dedup before ingest
+    semantic_dedup_enabled:           bool  = Field(default=os.getenv("SHAIL_SEMANTIC_DEDUP", "true").lower() == "true")
+    semantic_dedup_window:            int   = Field(default=int(os.getenv("SHAIL_DEDUP_WINDOW", "256")))
+    semantic_dedup_threshold:         float = Field(default=float(os.getenv("SHAIL_DEDUP_THRESHOLD", "0.95")))
+    semantic_dedup_db:                str   = Field(default=os.getenv("SHAIL_DEDUP_DB", os.path.expanduser("~/Library/Application Support/SHAIL/dedup.db")))
+    # Dead-letter queue
+    dead_letter_db:                   str   = Field(default=os.getenv("SHAIL_DEAD_LETTER_DB", os.path.expanduser("~/Library/Application Support/SHAIL/dead_letter.db")))
+    # Retrieval usefulness feedback
+    usefulness_reranking_enabled:     bool  = Field(default=os.getenv("SHAIL_USEFULNESS_RERANK", "true").lower() == "true")
+    usefulness_boost_weight:          float = Field(default=float(os.getenv("SHAIL_USEFULNESS_BOOST", "0.15")))
+    usefulness_db:                    str   = Field(default=os.getenv("SHAIL_USEFULNESS_DB", os.path.expanduser("~/Library/Application Support/SHAIL/usefulness.db")))
+
 
 _settings: Optional[Settings] = None
 
