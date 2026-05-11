@@ -19,6 +19,77 @@ export type SourceApp =
   | 'perplexity'
   | 'web';
 
+// ─── Structured payloads (v2 envelopes) ─────────────────────────────────────
+
+export interface GithubHunkLine {
+  kind: '+' | '-' | ' ';
+  text: string;
+}
+
+export interface GithubHunk {
+  header: string;
+  lines: GithubHunkLine[];
+}
+
+export interface GithubFile {
+  path: string;
+  status?: string;
+  hunks: GithubHunk[];
+  patch_text?: string;
+  summary?: string;
+}
+
+export interface GithubDiffPayload {
+  repo: string;
+  owner: string;
+  pr_number: number;
+  base_sha?: string;
+  head_sha?: string;
+  files: GithubFile[];
+  rendered_patch: string;
+}
+
+export interface HtmlTablePayload {
+  title?: string;
+  columns: string[];
+  rows: (string | number)[][];
+  column_types?: string[];
+  units?: string;
+  source_locator?: string;
+  header_depth?: number;
+}
+
+export interface DashboardCardPayload {
+  section_title?: string;
+  card_title?: string;
+  primary_value?: string;
+  value_num?: number | null;
+  unit?: string;
+  delta_value?: string;
+  delta_unit?: string;
+  time_window?: string;
+  subtitle?: string;
+  source_locator?: string;
+}
+
+export interface ChartSeries {
+  name?: string;
+  values?: (number | string)[];
+}
+
+export interface SvgChartPayload {
+  title?: string;
+  subtitle?: string;
+  chart_type?: string;
+  time_window?: string;
+  x_axis?: string;
+  y_axis?: string;
+  series?: ChartSeries[];
+  legend?: string[];
+  source_locator?: string;
+  capture_confidence?: 'complete' | 'partial';
+}
+
 export interface CaptureCandidate {
   /** SHA-256 fingerprint — stable per conversation when conversationId is present */
   customId: string;
@@ -32,9 +103,25 @@ export interface CaptureCandidate {
   userText?: string;      // the user's prompt (ai_conversation only)
   assistantText?: string; // the AI's response (ai_conversation only)
   pageContent?: string;   // trimmed page text (page_visit only)
+  /** Canonical thread ID from the provider's URL (e.g. ChatGPT /c/<uuid>).
+   *  When present, the backend upserts to the same memory record for every
+   *  turn in the conversation instead of creating a new record per snapshot. */
+  conversationId?: string;
+  artifactKind?: string;
+  artifactMimeType?: string;
+  artifactPayload?: Record<string, unknown>;
+  artifactBase64?: string;
+  artifactCompleteness?: 'complete' | 'partial' | 'stub' | 'legacy_partial';
+  captureHints?: Record<string, unknown>;
+  selectorVersion?: string;
 }
 
 // ─── Memory ─────────────────────────────────────────────────────────────────
+
+export type MemoryStateLabel =
+  | 'captured' | 'partial' | 'queued' | 'replayable'
+  | 'active' | 'historical' | 'failed' | 'synced'
+  | 'local-only' | 'trusted' | 'incomplete';
 
 export interface MemoryRecord {
   id: string;
@@ -49,6 +136,12 @@ export interface MemoryRecord {
   pinned?: boolean;
   /** Relevance score from Supermemory's hybrid search (0–1). Higher = more relevant. */
   score?: number;
+  // v2 manifesto — additive, may be undefined for legacy records.
+  confidence?: number;
+  state?: MemoryStateLabel;
+  fidelity?: number | null;
+  version?: number;
+  parentId?: string | null;
 }
 
 // ─── Search / Context ────────────────────────────────────────────────────────
@@ -128,7 +221,7 @@ export interface UserProfile {
 
 export interface CaptureResult {
   memoryId: string;
-  status: 'created' | 'duplicate' | 'denied';
+  status: 'created' | 'queued' | 'duplicate' | 'denied';
   summary?: string;
 }
 
@@ -147,7 +240,8 @@ export type BackgroundMessage =
   | { type: 'OPEN_SIDEPANEL' }
   | { type: 'GET_POLICIES' }
   | { type: 'FETCH_ASCENT'; payload: { id: string } }
-  | { type: 'TOGGLE_TODO'; payload: { ascentId: string; todoId: string; completed: boolean } };
+  | { type: 'TOGGLE_TODO'; payload: { ascentId: string; todoId: string; completed: boolean } }
+  | { type: 'SYNC_PAUSE_BADGE'; payload: { enabled: boolean } };
 
 export type BackgroundResponse =
   | { ok: true; data: unknown }

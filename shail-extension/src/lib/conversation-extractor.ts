@@ -31,6 +31,7 @@ export interface ExtractedTranscript {
   assistantText: string;     // full transcript joined
   turnCount: number;         // how many turn-pairs were captured
   latestAssistantText: string; // for change-detection / dedup keys
+  turns: Array<{ user: string; assistant: string }>;
 }
 
 /**
@@ -82,6 +83,7 @@ export function extractTranscript(opts: MultiTurnSelectors): ExtractedTranscript
       assistantText: latestAssistant,
       turnCount: 0,
       latestAssistantText: latestAssistant,
+      turns: [{ user: '', assistant: latestAssistant }],
     };
   }
 
@@ -109,5 +111,6 @@ export function extractTranscript(opts: MultiTurnSelectors): ExtractedTranscript
     assistantText: fullTranscript,
     turnCount: turns.length,
     latestAssistantText,
+    turns: recent,
   };
 }

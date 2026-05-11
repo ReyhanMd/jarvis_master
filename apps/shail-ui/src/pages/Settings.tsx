@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, CaptureSettings, LLMSettings } from '../api';
 import { clearAuth, getProfile } from '../auth';
 import { AnonymousSyncModal } from '../components/AnonymousSyncModal';
+import { flag } from '../lib/featureFlags';
 
 const MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
 const CARD = { background: '#0d0d0d', border: '1px solid #161616', borderRadius: 9 } as const;
@@ -263,21 +264,23 @@ export function Settings() {
                 </div>
               }
             />
-            <Row
-              label="Site policies"
-              hint="Domains in this list are never captured. No memories, no prompts."
-              control={
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {(settings?.blocked_domains || []).slice(0, 2).map(d => (
-                    <code key={d} style={{ padding: '4px 8px', background: '#1a1a1a', borderRadius: 4, fontSize: 10, color: '#aaa', fontFamily: MONO }}>{d}</code>
-                  ))}
-                  {(settings?.blocked_domains.length ?? 0) > 2 && (
-                    <code style={{ padding: '4px 8px', background: '#1a1a1a', borderRadius: 4, fontSize: 10, color: '#aaa', fontFamily: MONO }}>+ {(settings!.blocked_domains.length) - 2} more</code>
-                  )}
-                  <button onClick={() => setShowManageDomains(true)} style={{ padding: '5px 10px', fontSize: 11, background: 'transparent', border: '1px solid #1f1f1f', borderRadius: 5, color: '#aaa', cursor: 'pointer' }}>Manage</button>
-                </div>
-              }
-            />
+            {!flag('ui_v2') && (
+              <Row
+                label="Site policies"
+                hint="Domains in this list are never captured. No memories, no prompts."
+                control={
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {(settings?.blocked_domains || []).slice(0, 2).map(d => (
+                      <code key={d} style={{ padding: '4px 8px', background: '#1a1a1a', borderRadius: 4, fontSize: 10, color: '#aaa', fontFamily: MONO }}>{d}</code>
+                    ))}
+                    {(settings?.blocked_domains.length ?? 0) > 2 && (
+                      <code style={{ padding: '4px 8px', background: '#1a1a1a', borderRadius: 4, fontSize: 10, color: '#aaa', fontFamily: MONO }}>+ {(settings!.blocked_domains.length) - 2} more</code>
+                    )}
+                    <button onClick={() => setShowManageDomains(true)} style={{ padding: '5px 10px', fontSize: 11, background: 'transparent', border: '1px solid #1f1f1f', borderRadius: 5, color: '#aaa', cursor: 'pointer' }}>Manage</button>
+                  </div>
+                }
+              />
+            )}
           </div>
         </section>
 
@@ -464,6 +467,45 @@ export function Settings() {
 
         <section id="privacy" style={{ marginBottom: 40 }}>
           <h2 style={{ margin: '0 0 14px', fontSize: 11, fontWeight: 600, color: '#3a3a3a', letterSpacing: '0.12em', fontFamily: MONO }}>PRIVACY</h2>
+          {flag('ui_v2') && (
+            <div style={{ ...CARD, padding: '0 18px', marginBottom: 10 }}>
+              <Row
+                label="Pause all capture"
+                hint="Temporarily stop indexing new conversations and pages. Existing memories are unaffected."
+                control={<Toggle checked={!settings?.capture_enabled} onChange={v => setSettingsField('capture_enabled', !v)} />}
+              />
+              <Row
+                label="Local-only mode"
+                hint="Memories stay on your device. No data sent to the cloud sync layer. Disables cross-device search."
+                control={
+                  <Toggle
+                    checked={localStorage.getItem('shail_local_only') === '1'}
+                    onChange={v => {
+                      if (v) localStorage.setItem('shail_local_only', '1');
+                      else localStorage.removeItem('shail_local_only');
+                    }}
+                  />
+                }
+              />
+              <Row
+                label="Blocked sites"
+                hint="Domains on this list are never captured. Takes effect immediately."
+                control={
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {(settings?.blocked_domains || []).slice(0, 2).map(d => (
+                      <code key={d} style={{ padding: '4px 8px', background: '#1a1a1a', borderRadius: 4, fontSize: 10, color: '#aaa', fontFamily: MONO }}>{d}</code>
+                    ))}
+                    {(settings?.blocked_domains.length ?? 0) > 2 && (
+                      <code style={{ padding: '4px 8px', background: '#1a1a1a', borderRadius: 4, fontSize: 10, color: '#aaa', fontFamily: MONO }}>
+                        +{settings!.blocked_domains.length - 2} more
+                      </code>
+                    )}
+                    <button onClick={() => setShowManageDomains(true)} style={{ padding: '5px 10px', fontSize: 11, background: 'transparent', border: '1px solid #1f1f1f', borderRadius: 5, color: '#aaa', cursor: 'pointer' }}>Manage</button>
+                  </div>
+                }
+              />
+            </div>
+          )}
           <div style={{ ...CARD, padding: 18, marginBottom: 10 }}>
             <div style={{ fontSize: 13, color: '#fff', marginBottom: 4 }}>Clear all memories</div>
             <div style={{ fontSize: 12, color: '#666', marginBottom: 14 }}>

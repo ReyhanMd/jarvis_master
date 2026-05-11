@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import os
 import secrets
+import ssl
 from urllib.parse import urlencode
 
+import certifi
 import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -47,6 +49,18 @@ except Exception:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _oauth_http_client() -> httpx.AsyncClient:
+    """
+    Build an HTTPS client with an explicit CA bundle.
+
+    Some local macOS Python/OpenSSL installs end up with a broken default
+    certificate path, which causes `httpx.AsyncClient()` construction itself to
+    fail with FileNotFoundError before we even reach Google's token endpoint.
+    Pinning to certifi avoids that machine-specific failure mode.
+    """
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    return httpx.AsyncClient(verify=ssl_context)
 
 def _get_or_create_user(email: str, name: str) -> tuple[str, str]:
     """Return (api_key, user_id) for this Google user (create account if new)."""
@@ -107,7 +121,7 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
         return HTMLResponse("<h2>Invalid or expired auth session.</h2>", status_code=400)
 
     # Exchange authorization code for tokens
-    async with httpx.AsyncClient() as client:
+    async with _oauth_http_client() as client:
         token_resp = await client.post(
             "https://oauth2.googleapis.com/token",
             data={
@@ -125,7 +139,7 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
         return HTMLResponse("<h2>Token exchange failed.</h2>", status_code=502)
 
     # Fetch user info from Google
-    async with httpx.AsyncClient() as client:
+    async with _oauth_http_client() as client:
         info_resp = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},

@@ -67,6 +67,8 @@ export default defineContentScript({
           sourceApp: 'perplexity',
           userText,
           assistantText: assistantPayload,
+          turns: transcript.turns,
+          selectorVersion: 'perplexity:answer-content:v1',
         });
         await sendCapture(candidate);
       }

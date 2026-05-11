@@ -31,13 +31,29 @@ export const api = {
     req<{ ok: boolean }>(`/browser/memories/${id}`, { method: 'DELETE' }),
   getMemory: (id: string) =>
     req<MemoryRecord & { content?: string }>(`/browser/memories/${id}`),
+  getRelatedMemories: (id: string, limit = 10) =>
+    req<MemoryRecord[]>(`/api/v2/memories/${id}/related?limit=${limit}`),
+  memoryGraph: () =>
+    req<MemoryGraph>('/api/v2/graph'),
   getBlueprint: (id: string) =>
     req<Blueprint>(`/browser/blueprint/${id}`),
   getBlueprintIds: (ids: string[]) =>
     req<{ ids: string[] }>('/browser/blueprint-ids', { method: 'POST', body: JSON.stringify({ ids }) }),
+  getArtifacts: (id: string) =>
+    req<{ items: CaptureArtifact[] }>(`/browser/memories/${id}/artifacts`),
+  getMaterializations: (id: string) =>
+    req<{ items: MemoryMaterialization[] }>(`/browser/memories/${id}/materializations`),
+  getCaptureHealth: (id: string) =>
+    req<CaptureHealth>(`/browser/memories/${id}/capture-health`),
+  createReplayJob: (body: ReplayJobRequest) =>
+    req<ReplayJobSummary>('/browser/replay/jobs', { method: 'POST', body: JSON.stringify(body) }),
+  getReplayJob: (id: string) =>
+    req<ReplayJobDetail>(`/browser/replay/jobs/${id}`),
 
   // Stats
   stats: () => req<{ totalMemories: number; memoriesThisWeek: number; topSource: string | null; lastCapturedAt: string | null }>('/browser/stats'),
+  altitude: (days = 7) =>
+    req<AltitudeResponse>(`/browser/altitude?days=${days}`),
 
   // Settings
   getSettings: () => req<CaptureSettings>('/browser/capture-settings'),
@@ -84,6 +100,23 @@ export const api = {
   deleteChatSession: (id: string) =>
     req<{ ok: boolean }>(`/browser/chat/sessions/${id}`, { method: 'DELETE' }),
 
+  // MCP connectors
+  listMcpProviders: () => req<{ items: McpProvider[] }>('/mcp/providers'),
+  startMcpAuth: (provider: string) => req<{ authorize_url: string }>(`/mcp/${provider}/auth/start`),
+  disconnectMcp: (provider: string) =>
+    req<{ ok: boolean }>(`/mcp/connections/${provider}`, { method: 'DELETE' }),
+  mcpIndexStatus: (provider: string) =>
+    req<{ indexed_count: number; status: string; error: string | null; last_synced: string | null }>(`/mcp/${provider}/index/status`),
+  reindexMcp: (provider: string) =>
+    req<{ ok: boolean; status: string }>(`/mcp/${provider}/index/run`, { method: 'POST' }),
+  getMcpSettings: (provider: string) =>
+    req<{ settings: Record<string, unknown> }>(`/mcp/${provider}/settings`),
+  putMcpSettings: (provider: string, settings: Record<string, unknown>) =>
+    req<{ settings: Record<string, unknown> }>(`/mcp/${provider}/settings`, {
+      method: 'PUT', body: JSON.stringify({ settings }),
+    }),
+  gmailLabels: () => req<{ labels: { id: string; name: string; type: string }[] }>('/mcp/gmail/labels'),
+
   // LLM settings
   llmSettings: () => req<LLMSettings>('/browser/llm-settings'),
   putLLMSettings: (body: Partial<LLMSettingsUpdate>) =>
@@ -100,6 +133,10 @@ export const api = {
   // Routes & Horizon
   routes: () => req<{ routes: RouteCluster[]; total_clusters: number }>('/browser/routes'),
   horizon: () => req<{ items: HorizonItem[]; total_candidates: number }>('/browser/horizon'),
+
+  // Test retrieval for a connected source
+  testRetrieval: (sourceApp: string) =>
+    api.search({ query: 'test', filters: { sourceApp }, k: 3 }),
 
   // Anonymous memory sync
   anonymousCount: () => req<{ count: number }>('/browser/anonymous-count'),
@@ -211,6 +248,20 @@ export interface ChatSessionDetail extends ChatSessionSummary {
   messages: StoredChatMessage[];
 }
 
+// ── MCP types ──────────────────────────────────────────────────────────────
+export interface McpProvider {
+  name: 'drive' | 'github' | 'notion' | 'gmail';
+  label: string;
+  scopes: string[];
+  configured: boolean;     // server has OAuth client credentials in env
+  connected: boolean;      // user has connected this provider
+  metadata: Record<string, string>;   // email / login / workspace_name etc.
+  indexed_count: number;
+  index_status: 'idle' | 'indexing' | 'error';
+  index_error: string | null;
+  last_synced: string | null;
+}
+
 // ── LLM settings ───────────────────────────────────────────────────────────
 export interface LLMSettings {
   active_provider: 'ollama' | 'openai' | 'anthropic';
@@ -251,6 +302,11 @@ export interface HorizonItem {
   suggested_description: string;
 }
 
+export type MemoryStateLabel =
+  | 'captured' | 'partial' | 'queued' | 'replayable'
+  | 'active' | 'historical' | 'failed' | 'synced'
+  | 'local-only' | 'trusted' | 'incomplete';
+
 export interface MemoryRecord {
   id: string;
   customId: string;
@@ -264,6 +320,31 @@ export interface MemoryRecord {
   pinned: boolean;
   score?: number;
   content?: string;
+  // v2 manifesto fields (additive — server defaults to safe values for legacy records)
+  confidence?: number;
+  state?: MemoryStateLabel;
+  parentId?: string | null;
+  version?: number;
+  fidelity?: number | null;
+}
+
+export interface MemoryGraphNode {
+  id: string;
+  label: string;
+  type: string;
+  sourceApp: string;
+  timestamp: string;
+  importance: number;
+}
+
+export interface MemoryGraphEdge {
+  source: string;
+  target: string;
+}
+
+export interface MemoryGraph {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
 }
 
 export interface Blueprint {
@@ -271,13 +352,110 @@ export interface Blueprint {
   version: number;
   content_type: string;
   created_at: string;
+  artifact_id?: string | null;
+  materialization_id?: string | null;
+  extractor_bundle_version?: string | null;
+  updated_at?: string | null;
   summary: string;
-  decisions: string[];
+  decisions: Array<string | { statement: string; reasoning?: string | null; confidence?: string }>;
   questions_answered: { q: string; a: string }[];
   open_questions: string[];
   next_actions: string[];
   key_entities: string[];
-  code_references: { language: string; purpose: string }[];
+  reasoning_chains?: { conclusion: string; steps: string[]; evidence: string[] }[];
+  failed_attempts?: { approach: string; failure: string; lesson: string }[];
+  facts?: Record<string, unknown>[];
+  metrics?: Record<string, unknown>[];
+  tables?: Record<string, unknown>[];
+  extensions?: Record<string, unknown>;
+}
+
+export interface CaptureArtifact {
+  artifact_id: string;
+  artifact_seq: number;
+  artifact_kind: string;
+  completeness: string;
+  captured_at: string;
+  created_at: string;
+  byte_size: number;
+  event_type: string;
+  source_app: string;
+  source_url: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface MemoryMaterialization {
+  materialization_id: string;
+  memory_id: string;
+  artifact_id: string;
+  extractor_bundle_version: string;
+  content_type: string;
+  status: string;
+  is_active: boolean;
+  validation: Record<string, unknown>;
+  created_at: string;
+  promoted_at?: string | null;
+}
+
+export interface CaptureHealth {
+  memory_id: string;
+  artifact_count: number;
+  materialization_count: number;
+  completeness: string;
+  has_active_materialization: boolean;
+  latest_artifact_kind?: string | null;
+  latest_bundle_version?: string | null;
+}
+
+export interface AltitudePoint {
+  date: string;
+  bytes: number;
+  captures: number;
+}
+
+export interface AltitudeResponse {
+  points: AltitudePoint[];
+  totalBytes: number;
+  totalCaptures: number;
+  weekOverWeekPct: number;
+}
+
+export interface ReplayJobRequest {
+  mode?: 'shadow' | 'promote';
+  artifactId?: string;
+  memoryId?: string;
+  artifactKind?: string;
+}
+
+export interface ReplayJobSummary {
+  replay_job_id: string;
+  status: string;
+}
+
+export interface ReplayJobItem {
+  replay_job_item_id: string;
+  replay_job_id: string;
+  artifact_id: string;
+  memory_id: string;
+  status: string;
+  materialization_id?: string | null;
+  validation: Record<string, unknown>;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReplayJobDetail extends ReplayJobSummary {
+  mode: string;
+  scope_type: string;
+  scope_ref: string;
+  bundle_version: string;
+  validation: Record<string, unknown>;
+  prior_active_materialization_id?: string | null;
+  promoted_materialization_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  items: ReplayJobItem[];
 }
 
 export interface ServiceInfo {

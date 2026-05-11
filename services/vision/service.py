@@ -335,7 +335,7 @@ class VisionService:
         except Exception as e:
             logger.error(f"Error processing LiveKit frame: {e}")
     
-    async def start(self, host: str = "0.0.0.0", port: int = 8081):
+    async def start(self, host: str = "127.0.0.1", port: int = 8081):
         """Start the Vision Service HTTP API"""
         import uvicorn
         
@@ -357,4 +357,3 @@ if __name__ == "__main__":
         asyncio.run(service.start())
     except KeyboardInterrupt:
         logger.info("👋 Vision service stopped")
-

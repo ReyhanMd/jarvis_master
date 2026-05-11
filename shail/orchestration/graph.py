@@ -174,11 +174,17 @@ class LangGraphExecutor:
             with open('/Users/reyhan/shail_master/.cursor/debug.log', 'a') as f:
                 f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"H","location":"graph.py:run","message":"Creating initial state","data":{"desktop_id":desktop_id,"task_id":self.task_id},"timestamp":time.time()})+'\n')
             # #endregion
+            # Phase 5: shared context namespace
+            _mode = getattr(req, "mode", None) or "default"
             initial_state = {
                 "task_description": req.text,
                 "request": req.text,
                 "task_id": self.task_id,
                 "desktop_id": desktop_id,  # Include desktop context
+                # Phase 5 — shared context fields
+                "shared_context_id": self.task_id,
+                "memory_namespace": _mode,
+                "execution_lineage": [],
                 "services": {
                     "ui_twin": settings.ui_twin_url,
                     "action_executor": settings.action_executor_url,

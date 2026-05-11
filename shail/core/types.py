@@ -62,10 +62,14 @@ class TaskResult(BaseModel):
     artifacts: Optional[List[Artifact]] = Field(None, description="Files or data artifacts produced")
     audit_ref: Optional[str] = Field(None, description="Reference to audit log entry")
     permission_request: Optional[PermissionRequest] = Field(
-        None, 
+        None,
         description="Permission request if status is AWAITING_APPROVAL"
     )
     task_id: Optional[str] = Field(None, description="Unique identifier for this task")
+    # Phase 3 — auto-ingest fields
+    memory_quality_score: Optional[float] = Field(None, description="Quality score for auto-ingest (0..1)")
+    auto_ingest_enabled: Optional[bool] = Field(None, description="Override flag for auto-ingest per task")
+    generated_by: Optional[str] = Field(None, description="Agent type that generated this result")
 
 
 class ChatRequest(BaseModel):

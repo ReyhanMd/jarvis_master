@@ -14,11 +14,12 @@
 import type { SourceApp } from '../types/contracts';
 
 export interface NotifyOptions {
-  title:          string;
-  sourceApp:      SourceApp;
-  onSave:         () => void;
-  onSkip:         () => void;
-  autoDismissMs?: number;
+  title:           string;
+  sourceApp:       SourceApp;
+  onSave:          () => void;
+  onSkip:          () => void;
+  conversationId?: string;   // if set, shows "Pause this chat" button
+  autoDismissMs?:  number;
 }
 
 let activeCleanup: (() => void) | null = null;
@@ -172,6 +173,14 @@ const WIDGET_CSS = `
   }
   .shail-btn-skip:hover { color: #888; }
 
+  .shail-btn-pause {
+    background: rgba(245,158,11,0.1);
+    color: #f59e0b;
+    border-color: rgba(245,158,11,0.3);
+    font-size: 10px;
+  }
+  .shail-btn-pause:hover { background: rgba(245,158,11,0.18); }
+
   .shail-progress-track {
     height: 2px;
     background: #1a1a1a;
@@ -188,6 +197,8 @@ const WIDGET_CSS = `
   }
 `;
 
+const KEY_PAUSED_CONVOS = 'shail_paused_conversations';
+
 export function showCapturePrompt(opts: NotifyOptions): void {
   if (activeCleanup) { activeCleanup(); activeCleanup = null; }
 
@@ -195,6 +206,7 @@ export function showCapturePrompt(opts: NotifyOptions): void {
   const appColor  = getAppColor(opts.sourceApp);
   const appLabel  = getAppLabel(opts.sourceApp);
   const preview   = opts.title.trim().slice(0, 68) || 'Memory worth saving?';
+  const hasPause  = !!opts.conversationId;
 
   const host = document.createElement('div');
   host.setAttribute('data-shail-notify', '');
@@ -219,7 +231,7 @@ export function showCapturePrompt(opts: NotifyOptions): void {
     <div class="shail-preview" title="${preview}">${preview}</div>
     <div class="shail-actions">
       <button class="shail-btn shail-btn-save">💾 Save</button>
-      <button class="shail-btn shail-btn-session" title="Coming soon — capture the whole active session">Capture session ▶</button>
+      ${hasPause ? '<button class="shail-btn shail-btn-pause" title="Stop capturing this conversation">⏸ Pause chat</button>' : ''}
       <button class="shail-btn shail-btn-skip">Skip</button>
     </div>
     <div class="shail-progress-track">
@@ -236,7 +248,7 @@ export function showCapturePrompt(opts: NotifyOptions): void {
 
   let dismissed = false;
 
-  function dismiss(action: 'save' | 'skip' | 'timeout') {
+  function dismiss(action: 'save' | 'skip' | 'pause' | 'timeout') {
     if (dismissed) return;
     dismissed = true;
     activeCleanup = null;
@@ -245,6 +257,7 @@ export function showCapturePrompt(opts: NotifyOptions): void {
     setTimeout(() => host.remove(), 350);
     if (action === 'save') opts.onSave();
     else if (action === 'skip') opts.onSkip();
+    else if (action === 'pause') opts.onSkip(); // don't save; pause handled below
   }
 
   const timer = setTimeout(() => dismiss('timeout'), dismissMs);
@@ -253,16 +266,18 @@ export function showCapturePrompt(opts: NotifyOptions): void {
   card.querySelector('.shail-btn-skip')!.addEventListener('click', () => dismiss('skip'));
   card.querySelector('.shail-close')!.addEventListener('click', () => dismiss('skip'));
 
-  // Capture session — stub for now (show future feature note)
-  card.querySelector('.shail-btn-session')!.addEventListener('click', () => {
-    const btn = card.querySelector<HTMLElement>('.shail-btn-session')!;
-    btn.textContent = 'Coming soon ✦';
-    btn.style.opacity = '0.6';
-    btn.style.cursor = 'default';
-    // Save the current memory as well
-    opts.onSave();
-    setTimeout(() => dismiss('skip'), 1200);
-  });
+  if (hasPause) {
+    card.querySelector('.shail-btn-pause')!.addEventListener('click', async () => {
+      const convId = opts.conversationId!;
+      try {
+        const stored = await browser.storage.local.get(KEY_PAUSED_CONVOS);
+        const paused: string[] = (stored[KEY_PAUSED_CONVOS] as string[]) ?? [];
+        if (!paused.includes(convId)) paused.push(convId);
+        await browser.storage.local.set({ [KEY_PAUSED_CONVOS]: paused });
+      } catch { /* best-effort */ }
+      dismiss('pause');
+    });
+  }
 
   activeCleanup = () => dismiss('skip');
 }

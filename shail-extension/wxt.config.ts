@@ -23,6 +23,17 @@ export default defineConfig({
         },
         description: 'Open SHAIL memory side panel',
       },
+      // Ctrl+Shift+P → toggle capture pause/resume globally.
+      // Listed as suggested_key so Chrome falls back gracefully if the slot is
+      // taken (e.g. Print Preview on some platforms). Users can rebind via
+      // chrome://extensions/shortcuts.
+      'toggle-capture': {
+        suggested_key: {
+          default: 'Ctrl+Shift+P',
+          mac: 'MacCtrl+Shift+P',
+        },
+        description: 'Pause / resume SHAIL capture',
+      },
     },
   },
 });

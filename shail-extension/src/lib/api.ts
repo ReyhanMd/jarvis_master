@@ -283,6 +283,18 @@ export const api = {
     };
   },
 
+  async captureV2(payload: CaptureCandidate): Promise<CaptureResult> {
+    const result = await localFetch<{ memoryId: string; status: string; summary?: string }>(
+      '/capture/v2',
+      { method: 'POST', body: JSON.stringify(payload) },
+    );
+    return {
+      memoryId: result.memoryId,
+      status: result.status as 'created' | 'duplicate' | 'denied',
+      summary: result.summary,
+    };
+  },
+
   /**
    * Search memories.
    *

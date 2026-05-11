@@ -38,7 +38,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
+import time
 from typing import AsyncIterator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -57,6 +59,9 @@ from apps.shail.blueprints import (
 from apps.shail.capture_log import write_event
 from apps.shail import chat_store
 from apps.shail.llm import call_llm, get_user_llm_config, stream_llm
+from apps.shail.mcp import PROVIDERS, get_provider as get_mcp_provider
+from apps.shail.mcp.routing import pick_providers
+from apps.shail.mcp_store import get_connection as get_mcp_connection, get_settings as get_mcp_settings, list_connections as list_mcp_connections
 from apps.shail.web_search import (
     format_for_prompt as web_format,
     needs_web_search,
@@ -64,6 +69,10 @@ from apps.shail.web_search import (
 )
 from shail.memory.rag import _get_store, ingest, search as rag_search
 from shail.memory.embeddings import embed_query as emb_q
+# Sprint 3 PR3 — hybrid retrieval. Imported lazily to keep cold-start cost
+# tied to actual flag activation; settings flag default OFF preserves legacy.
+from shail.memory.hybrid import hybrid_search as _hybrid_search
+from apps.shail.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +95,85 @@ CHAT_SYSTEM_PROMPT = (
     "next to the claim they support. Be concise and direct."
 )
 
-RAG_K           = 6
+# Sprint 4 PR2: structured-grounding policy. Appended to the system prompt
+# ONLY when SHAIL_CONTEXT_PACKET is ON. References the packet section
+# names emitted by `apps.shail.retrieval.packet.build`.
+GROUNDING_POLICY_PROMPT = (
+    "\n\nSTRUCTURED GROUNDING POLICY — read carefully:\n"
+    "Below the AVAILABLE CITATIONS block you will see a structured packet "
+    "with four sections:\n"
+    "  === EXACT_FACTS ===          # canonical fact rows (entity, attribute, value)\n"
+    "  === STRUCTURED_FACTS ===     # rows from blueprint tables/metrics\n"
+    "  === SUPPORTING_CONTEXT ===   # supporting prose passages\n"
+    "  === CITATIONS ===            # condensed list of memory_ids and titles\n\n"
+    "Rules for numeric/value answers:\n"
+    "1. Answer numeric values ONLY using rows present in EXACT_FACTS or "
+    "   STRUCTURED_FACTS. Cite the source memory_id with the existing "
+    "   {{cite:memory:<memory_id>}} token.\n"
+    "2. If a value the user asks for is NOT present in EXACT_FACTS or "
+    "   STRUCTURED_FACTS, reply exactly: \"not found in memory\" and STOP. "
+    "   Do not fabricate or interpolate numbers.\n"
+    "3. If both sections show \"(none)\", treat the value as absent.\n"
+    "4. SUPPORTING_CONTEXT is for narrative framing only — never source "
+    "   numeric values from it.\n"
+    "5. Keep memory_id citations natural in prose (e.g., \"per "
+    "{{cite:memory:abc123}}\"). Do not dump raw memory_id strings."
+)
+
+
+def _system_prompt() -> str:
+    """Return the active system prompt. Appends grounding policy when
+    SHAIL_CONTEXT_PACKET is ON. Default OFF returns the legacy prompt
+    bit-for-bit."""
+    s = get_settings()
+    if s.shail_context_packet and s.shail_hybrid_retrieval:
+        return CHAT_SYSTEM_PROMPT + GROUNDING_POLICY_PROMPT
+    return CHAT_SYSTEM_PROMPT
+
+RAG_K               = 6
+RAG_K_OVERFETCH     = 12   # fetch this many from Chroma, re-rank to RAG_K with time-decay
+DECAY_HALF_LIFE_DAYS = 30  # exponential decay half-life for memory recall ranking
 WEB_MAX_RESULTS = 3
 WEB_TIMEOUT     = 3.0
 PAST_CHAT_K     = 3
+
+
+def _apply_time_decay(
+    hits: List[tuple], *, k: int = RAG_K, half_life_days: float = DECAY_HALF_LIFE_DAYS,
+) -> list:
+    """Re-rank `(content, score, metadata)` tuples by Chroma cosine distance
+    weighted by an exponential time-decay penalty on `captured_ts` epoch.
+
+    Lower adjusted score = better. Pinned records (`metadata.pinned == "true"`)
+    bypass the decay penalty so curated memories stay top regardless of age.
+    Records missing/unparseable `captured_ts` are treated as no-decay so
+    legacy/imported memories don't disappear from chat context.
+    """
+    now_ts = time.time()
+    scored: list[tuple[tuple, float]] = []
+    for hit in hits:
+        try:
+            _content, score, meta = hit
+        except (TypeError, ValueError):
+            continue
+        meta = meta or {}
+        if meta.get("pinned") == "true":
+            adjusted = float(score)
+        else:
+            captured_raw = meta.get("captured_ts")
+            try:
+                captured = float(captured_raw) if captured_raw is not None else None
+            except (TypeError, ValueError):
+                captured = None
+            if captured is None:
+                adjusted = float(score)
+            else:
+                age_days = max(0.0, (now_ts - captured) / 86400.0)
+                decay = math.exp(-age_days / half_life_days)
+                adjusted = float(score) / (decay + 0.01)
+        scored.append((hit, adjusted))
+    scored.sort(key=lambda x: x[1])
+    return [h for h, _ in scored[:k]]
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 
@@ -222,6 +306,14 @@ class PastChatCitation(BaseModel):
     score: float = 0.0
 
 
+class MCPCitation(BaseModel):
+    provider: str
+    id: str
+    title: str
+    snippet: str = ""
+    url: Optional[str] = None
+
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
@@ -232,6 +324,7 @@ class ChatResponse(BaseModel):
     memories: List[MemoryCitation] = Field(default_factory=list)
     past_chats: List[PastChatCitation] = Field(default_factory=list)
     web_sources: List[WebSourceOut] = Field(default_factory=list)
+    mcp_sources: List[MCPCitation] = Field(default_factory=list)
     used_web: bool = False
 
 
@@ -242,17 +335,90 @@ class SessionPatch(BaseModel):
 
 # ── Context build ───────────────────────────────────────────────────────────
 
+async def _fetch_mcp_sources(user_id: str, query: str) -> list[MCPCitation]:
+    """Hybrid-routed active fetch over the user's connected MCP providers.
+
+    Stage A picks providers via heuristic; Stage B uses LLM fallback when
+    ambiguous. Each provider call has a 2s hard timeout; failures are
+    logged and dropped so chat never stalls on a flaky integration.
+    """
+    conns = list_mcp_connections(user_id)
+    if not conns:
+        return []
+    connected = {c["provider"] for c in conns}
+    picked = await pick_providers(query, connected=connected, user_id=user_id)
+    if not picked:
+        return []
+
+    async def _one(provider_name: str) -> list[MCPCitation]:
+        prov = get_mcp_provider(provider_name)
+        conn = get_mcp_connection(user_id, provider_name)
+        if not prov or not conn:
+            return []
+        settings = get_mcp_settings(user_id, provider_name) or {}
+        # Provider-specific settings hint (e.g. github needs login from OAuth metadata)
+        settings = {**settings, **(conn.get("metadata") or {})}
+        try:
+            hits = await asyncio.wait_for(
+                prov.fetch_relevant(
+                    user_id=user_id, query=query, k=3,
+                    access_token=conn["access_token"],
+                    refresh_token=conn.get("refresh_token"),
+                    settings=settings,
+                ),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("mcp fetch timeout: %s", provider_name)
+            return []
+        except Exception as e:
+            logger.warning("mcp fetch error (%s): %s", provider_name, e)
+            return []
+        out: list[MCPCitation] = []
+        for h in hits:
+            out.append(MCPCitation(
+                provider=provider_name,
+                id=h.id,
+                title=h.title,
+                snippet=h.snippet,
+                url=h.url,
+            ))
+            write_event("MCP_FETCH", f"{provider_name}: {h.title[:60]}",
+                        user_id=user_id, ref_id=h.id)
+        return out
+
+    results = await asyncio.gather(*[_one(p) for p in picked], return_exceptions=True)
+    flat: list[MCPCitation] = []
+    for r in results:
+        if isinstance(r, list):
+            flat.extend(r)
+    return flat
+
+
 async def _build_context(
     user_id: str, query: str, *, is_first_in_session: bool,
-) -> tuple[str, list[MemoryCitation], list[PastChatCitation], list[WebSourceOut]]:
+) -> tuple[str, list[MemoryCitation], list[PastChatCitation], list[WebSourceOut], list[MCPCitation]]:
     """Run all retrieval sources in parallel; combine into a single context
     block plus structured citation lists.
     """
     namespace = f"user_{user_id}"
 
     async def _rag() -> list:
+        # Sprint 3 PR3 — flag-gated hybrid retrieval. Default OFF preserves
+        # legacy semantic-only path bit-for-bit. Hybrid returns the same
+        # `(content, score, metadata)` tuple shape so the rest of
+        # `_build_context` is untouched.
+        if get_settings().shail_hybrid_retrieval:
+            try:
+                return await _hybrid_search(
+                    query, namespace=namespace,
+                    k=RAG_K, overfetch_k=RAG_K_OVERFETCH,
+                )
+            except Exception as e:
+                logger.warning("hybrid_search failed; falling back to legacy rag: %s", e)
         try:
-            return rag_search(query, k=RAG_K, namespace=namespace)
+            raw = rag_search(query, k=RAG_K_OVERFETCH, namespace=namespace)
+            return _apply_time_decay(raw, k=RAG_K)
         except Exception as e:
             logger.warning("rag_search failed in chat: %s", e)
             return []
@@ -264,6 +430,7 @@ async def _build_context(
 
     rag_task  = asyncio.create_task(_rag())
     past_task = asyncio.create_task(_past())
+    mcp_task  = asyncio.create_task(_fetch_mcp_sources(user_id, query))
     web_task = (
         asyncio.create_task(web_search(query, max_results=WEB_MAX_RESULTS, timeout=WEB_TIMEOUT))
         if needs_web_search(query) else None
@@ -271,6 +438,7 @@ async def _build_context(
 
     rag_hits     = await rag_task
     past_hits    = await past_task
+    mcp_cites    = await mcp_task
     web_results  = await web_task if web_task else []
 
     parts: list[str] = []
@@ -279,7 +447,26 @@ async def _build_context(
     web_sources: list[WebSourceOut] = []
 
     # ── Memories ──
-    if rag_hits:
+    # Sprint 4 PR3: deterministic context packet behind SHAIL_CONTEXT_PACKET.
+    # Coupled with SHAIL_HYBRID_RETRIEVAL: packet sections expect hits with
+    # `metadata.surface` set by hybrid_search. If packet is enabled but
+    # hybrid is OFF, EXACT_FACTS will be (none) and Gemma will reply
+    # "not found in memory" too aggressively — guard against that.
+    _settings = get_settings()
+    _use_packet = _settings.shail_context_packet and _settings.shail_hybrid_retrieval
+    if _use_packet and rag_hits:
+        from apps.shail.retrieval.packet import build as _build_packet
+        result = _build_packet(rag_hits)
+        parts.append(result.text)
+        for content, score, meta in rag_hits:
+            mid = meta.get("customId") or meta.get("id") or meta.get("memory_id") or ""
+            title = meta.get("title", "(untitled)")
+            if mid:
+                citations.append(MemoryCitation(id=mid, title=title, score=float(score)))
+                write_event("RECALL", f"memory used as chat context: {title[:60]}",
+                            user_id=user_id, ref_id=mid)
+    elif rag_hits:
+        # Legacy formatter — bit-for-bit unchanged.
         hit_ids = [
             (m.get("customId") or m.get("id") or m.get("memory_id") or "")
             for _, _, m in rag_hits
@@ -325,12 +512,21 @@ async def _build_context(
                             user_id=user_id, ref_id=asst_id)
         parts.append("\n\n".join(chat_lines))
 
+    # ── MCP connected sources ──
+    if mcp_cites:
+        mcp_lines = ["[AVAILABLE CITATIONS — Your connected sources]"]
+        for c in mcp_cites:
+            mcp_lines.append(
+                f"[mcp:{c.provider}:{c.id}] {c.title}\n{c.snippet}"
+            )
+        parts.append("\n\n".join(mcp_lines))
+
     # ── Web ──
     if web_results:
         parts.append("[AVAILABLE CITATIONS — Web results]\n" + web_format(web_results))
         web_sources = [WebSourceOut(**r) for r in web_results]
 
-    return "\n\n---\n\n".join(parts), citations, past_chat_cites, web_sources
+    return "\n\n---\n\n".join(parts), citations, past_chat_cites, web_sources, mcp_cites
 
 
 def _sse(event: dict) -> bytes:
@@ -444,7 +640,7 @@ async def chat(
     )
 
     # Build the unified RAG context
-    context, citations, past_chats, web_sources = await _build_context(
+    context, citations, past_chats, web_sources, mcp_sources = await _build_context(
         user_id, req.message, is_first_in_session=is_first,
     )
 
@@ -460,11 +656,19 @@ async def chat(
     if not req.stream:
         answer, meta = await call_llm(
             messages=messages, user_id=user_id,
-            context=context, system_prompt=CHAT_SYSTEM_PROMPT,
+            context=context, system_prompt=_system_prompt(),
         )
+        # Sprint 4 PR3: post-generation hallucinated-number check.
+        # Observability only — never blocks the response.
+        if get_settings().shail_context_packet:
+            try:
+                from apps.shail.retrieval.validator import validate_answer
+                validate_answer(answer or "", context or "")
+            except Exception:
+                pass
         asst_msg = chat_store.append_message(
             session_id, user_id, role="assistant", content=answer,
-            citations=_collect_citations(citations, past_chats, web_sources),
+            citations=_collect_citations(citations, past_chats, web_sources, mcp_sources),
             provider=meta.get("provider"), model=meta.get("model"),
         )
         # Index into past-chat RAG and auto-title (fire-and-forget)
@@ -479,7 +683,8 @@ async def chat(
             model=meta.get("model", cfg["model"]),
             fellback=meta.get("fellback", False),
             memories=citations, past_chats=past_chats,
-            web_sources=web_sources, used_web=bool(web_sources),
+            web_sources=web_sources, mcp_sources=mcp_sources,
+            used_web=bool(web_sources),
         )
 
     # ── Streaming path ──
@@ -491,18 +696,25 @@ async def chat(
             "is_first": is_first,
             "session_title": session["title"],
         })
+        # Per-source status — Block 4 unified-RAG observability for the UI.
+        yield _sse({"type": "source_status", "source": "memories",   "count": len(citations)})
+        yield _sse({"type": "source_status", "source": "past_chats", "count": len(past_chats)})
+        yield _sse({"type": "source_status", "source": "web",        "count": len(web_sources)})
+        yield _sse({"type": "source_status", "source": "mcp",        "count": len(mcp_sources)})
         if citations:
             yield _sse({"type": "memories", "items": [c.model_dump() for c in citations]})
         if past_chats:
             yield _sse({"type": "past_chats", "items": [c.model_dump() for c in past_chats]})
         if web_sources:
             yield _sse({"type": "web", "items": [s.model_dump() for s in web_sources]})
+        if mcp_sources:
+            yield _sse({"type": "mcp", "items": [c.model_dump() for c in mcp_sources]})
 
         chosen_meta = cfg
         full_answer_parts: list[str] = []
         async for chunk, meta in stream_llm(
             messages=messages, user_id=user_id,
-            context=context, system_prompt=CHAT_SYSTEM_PROMPT,
+            context=context, system_prompt=_system_prompt(),
         ):
             chosen_meta = meta
             full_answer_parts.append(chunk)
@@ -522,7 +734,7 @@ async def chat(
         # Persist the assistant reply
         asst_msg = chat_store.append_message(
             session_id, user_id, role="assistant", content=full_answer,
-            citations=_collect_citations(citations, past_chats, web_sources),
+            citations=_collect_citations(citations, past_chats, web_sources, mcp_sources),
             provider=chosen_meta.get("provider"),
             model=chosen_meta.get("model"),
         )
@@ -546,6 +758,7 @@ def _collect_citations(
     memories: list[MemoryCitation],
     past_chats: list[PastChatCitation],
     web_sources: list[WebSourceOut],
+    mcp_sources: Optional[list[MCPCitation]] = None,
 ) -> list[dict]:
     """Flatten the citation lists into a single JSON-serialisable array
     that the chat_messages.citations column stores. Used by the dashboard
@@ -562,6 +775,11 @@ def _collect_citations(
         })
     for i, w in enumerate(web_sources, start=1):
         out.append({"type": "web", "id": str(i), "title": w.title, "url": w.url, "snippet": w.snippet})
+    for c in (mcp_sources or []):
+        out.append({
+            "type": "mcp", "id": c.id, "provider": c.provider,
+            "title": c.title, "snippet": c.snippet, "url": c.url,
+        })
     return out
 
 

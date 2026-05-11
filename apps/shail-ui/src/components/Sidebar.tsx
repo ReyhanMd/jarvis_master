@@ -2,18 +2,20 @@ import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { api, AscentListResponse } from '../api';
 import { AccountBar } from './AccountBar';
+import { flag } from '../lib/featureFlags';
 
 const PRIMARY_NAV = [
   { to: '/',         label: 'Today',    icon: '◐' },
   { to: '/ascents',  label: 'Ascents',  icon: '△' },
   { to: '/routes',   label: 'Routes',   icon: '∿' },
-  { to: '/horizon',  label: 'Horizon',  icon: '◇' },
+  { to: '/horizon',  label: flag('ui_v2') ? 'Replay' : 'Horizon',  icon: '◇' },
 ];
 
 const SECONDARY_NAV = [
   { to: '/chat',        label: 'Chat',         icon: '◈' },
   { to: '/memories',    label: 'Memories',     icon: '◯' },
   { to: '/graph',       label: 'Graph',        icon: '⬡' },
+  { to: '/graphify',    label: 'Graphify',     icon: '◈' },
   { to: '/connections', label: 'Connections',  icon: '⊕' },
   { to: '/services',    label: 'Services',     icon: '◉' },
   { to: '/export',      label: 'Export',       icon: '↓' },

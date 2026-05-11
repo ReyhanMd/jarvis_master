@@ -1,6 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, MemoryRecord, SOURCE_COLOR, SOURCE_LABEL } from '../api';
 import { MemoryCard } from '../components/MemoryCard';
+import { useUIStore } from '../stores/ui';
+import { flag } from '../lib/featureFlags';
+import { StateBadge, type MemoryState } from '../components/primitives';
 
 const SOURCES = ['chatgpt', 'claude', 'gemini', 'perplexity', 'web'] as const;
 const DATE_OPTS = [
@@ -19,43 +24,71 @@ function dateAfter(key: string): string | undefined {
 }
 
 export function Memories() {
-  const [records, setRecords]         = useState<MemoryRecord[]>([]);
-  const [loading, setLoading]         = useState(true);
+  const v2 = flag('ui_v2');
+  const { id: deepLinkId } = useParams();
+  const navigate = useNavigate();
+  const openInspector = useUIStore(s => s.openInspector);
+  const qc = useQueryClient();
+
   const [query, setQuery]             = useState('');
   const [source, setSource]           = useState('all');
   const [date, setDate]               = useState('all');
+  const [stateFacet, setStateFacet]   = useState<'all' | MemoryState>('all');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [selected, setSelected]       = useState<Set<string>>(new Set());
-  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [deleteModal, setDeleteModal] = useState<{ ids: string[]; label: string } | null>(null);
-  const [blueprintIds, setBlueprintIds] = useState<Set<string>>(new Set());
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const fetchMemories = useCallback(async (q: string, src: string, dt: string) => {
-    setLoading(true);
-    try {
-      const resp = await api.search({ query: q, k: 100, after: dateAfter(dt) });
-      let items = resp.items;
-      if (src !== 'all') items = items.filter(r => r.sourceApp === src);
-      setRecords(items);
-      // Batch-fetch which of these have blueprints so MemoryCard can render
-      // the BLUEPRINT badge without one round-trip per card.
-      if (items.length > 0) {
-        try {
-          const r = await api.getBlueprintIds(items.map(i => i.id));
-          setBlueprintIds(new Set(r.ids));
-        } catch { setBlueprintIds(new Set()); }
-      } else {
-        setBlueprintIds(new Set());
-      }
-    } catch { setRecords([]); setBlueprintIds(new Set()); }
-    finally { setLoading(false); }
-  }, []);
-
+  // Debounce free-text search.
   useEffect(() => {
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => fetchMemories(query, source, date), 300);
-    return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [query, source, date, fetchMemories]);
+    const t = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Server fetch (cached).
+  const searchQuery = useQuery({
+    queryKey: ['memories', 'search', debouncedQuery, date],
+    queryFn: () => api.search({ query: debouncedQuery, k: 100, after: dateAfter(date) }),
+  });
+
+  const allRecords: MemoryRecord[] = searchQuery.data?.items ?? [];
+  const records = useMemo(() => {
+    let r = allRecords;
+    if (source !== 'all') r = r.filter(x => x.sourceApp === source);
+    if (v2 && stateFacet !== 'all') r = r.filter(x => (x.state as MemoryState | undefined) === stateFacet);
+    return r;
+  }, [allRecords, source, stateFacet, v2]);
+  const loading = searchQuery.isLoading;
+
+  // Blueprint badge enrichment (separate cached query keyed by visible ids).
+  const blueprintIdsKey = records.map(r => r.id).join(',');
+  const blueprintQuery = useQuery({
+    queryKey: ['memories', 'blueprint-ids', blueprintIdsKey],
+    queryFn: () => api.getBlueprintIds(records.map(r => r.id)),
+    enabled: records.length > 0,
+  });
+  const blueprintIds = useMemo(
+    () => new Set(blueprintQuery.data?.ids ?? []),
+    [blueprintQuery.data],
+  );
+
+  // Deep-link /memories/:id → open inspector slide-over (PR-08 mounts component).
+  useEffect(() => {
+    if (deepLinkId) openInspector(deepLinkId);
+  }, [deepLinkId, openInspector]);
+
+  // Optimistic delete via mutation.
+  const deleteMutation = useMutation({
+    mutationFn: (ids: string[]) => Promise.allSettled(ids.map(id => api.deleteMemory(id))),
+    onSuccess: (_res, ids) => {
+      qc.setQueryData<{ items: MemoryRecord[]; total: number }>(
+        ['memories', 'search', debouncedQuery, date],
+        (old) => old ? { ...old, items: old.items.filter(r => !ids.includes(r.id)) } : old,
+      );
+      setSelected(prev => { const next = new Set(prev); ids.forEach(id => next.delete(id)); return next; });
+      setDeleteModal(null);
+    },
+  });
+  const bulkDeleting = deleteMutation.isPending;
 
   function handleSelect(id: string, checked: boolean) {
     setSelected(prev => {
@@ -70,13 +103,8 @@ export function Memories() {
     else setSelected(new Set(records.map(r => r.id)));
   }
 
-  async function handleConfirmDelete(ids: string[]) {
-    setBulkDeleting(true);
-    await Promise.allSettled(ids.map(id => api.deleteMemory(id)));
-    setRecords(prev => prev.filter(r => !ids.includes(r.id)));
-    setSelected(prev => { const next = new Set(prev); ids.forEach(id => next.delete(id)); return next; });
-    setBulkDeleting(false);
-    setDeleteModal(null);
+  function handleConfirmDelete(ids: string[]) {
+    deleteMutation.mutate(ids);
   }
 
   function handleBulkDelete() {
@@ -86,59 +114,154 @@ export function Memories() {
   }
 
   function handleDeleted(id: string) {
-    setRecords(prev => prev.filter(r => r.id !== id));
+    qc.setQueryData<{ items: MemoryRecord[]; total: number }>(
+      ['memories', 'search', debouncedQuery, date],
+      (old) => old ? { ...old, items: old.items.filter(r => r.id !== id) } : old,
+    );
     setSelected(prev => { const next = new Set(prev); next.delete(id); return next; });
+  }
+
+  function handleOpenInspector(id: string) {
+    if (!v2) return; // Inspector mounts behind v2 flag.
+    openInspector(id);
+    navigate(`/memories/${id}`);
   }
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '40px 48px 0' }}>
-      <div style={{ marginBottom: 32 }}>
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 500, color: '#fff', letterSpacing: '-0.4px' }}>Memories</h1>
-        <p style={{ margin: '6px 0 0', fontSize: 13, color: '#3a3a3a' }}>
+      {/* Page header */}
+      <div style={{ marginBottom: 28 }}>
+        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 600, color: 'var(--shail-text-primary)', letterSpacing: '-0.5px' }}>
+          Memories
+        </h1>
+        <p style={{ margin: '5px 0 0', fontSize: 13, color: 'var(--shail-text-muted)' }}>
           {loading ? 'Loading…' : `${records.length} ${records.length === 1 ? 'memory' : 'memories'}`}
         </p>
       </div>
 
       {/* Controls */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 28 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
         <input
           value={query}
           onChange={e => setQuery(e.target.value)}
           placeholder="Search memories…"
-          style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 7, padding: '10px 14px', fontSize: 13, color: '#ccc', outline: 'none', width: '100%', boxSizing: 'border-box' }}
+          style={{
+            background: 'var(--shail-bg-raised)',
+            border: '1px solid var(--shail-border-subtle)',
+            borderRadius: 8,
+            padding: '10px 14px',
+            fontSize: 13,
+            color: 'var(--shail-text-primary)',
+            outline: 'none',
+            width: '100%',
+            boxSizing: 'border-box',
+            transition: 'border-color 0.15s',
+          }}
+          onFocus={e => (e.currentTarget.style.borderColor = 'var(--shail-border-strong)')}
+          onBlur={e => (e.currentTarget.style.borderColor = 'var(--shail-border-subtle)')}
         />
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {/* Source pills */}
+        {/* Source + date pills in a single horizontally-scrollable row */}
+        <div style={{ display: 'flex', gap: 6, overflowX: 'auto', scrollbarWidth: 'none' } as React.CSSProperties}>
           {['all', ...SOURCES].map(s => {
             const isActive = source === s;
-            const color = s === 'all' ? '#888' : (SOURCE_COLOR[s] ?? '#888');
+            const color = s === 'all' ? 'var(--shail-text-muted)' : (SOURCE_COLOR[s] ?? 'var(--shail-text-muted)');
+            const activeBg = s === 'all' ? 'var(--shail-bg-raised)' : (SOURCE_COLOR[s] ?? '#888') + '18';
+            const activeBorder = s === 'all' ? 'var(--shail-border-strong)' : (SOURCE_COLOR[s] ?? '#888') + '50';
             return (
-              <button key={s} onClick={() => setSource(s)} style={{ padding: '5px 12px', borderRadius: 20, fontSize: 11, fontWeight: 500, cursor: 'pointer', border: `1px solid ${isActive ? color + '50' : '#1a1a1a'}`, background: isActive ? color + '18' : 'transparent', color: isActive ? color : '#444', transition: 'all 0.1s' }}>
+              <button
+                key={s}
+                onClick={() => setSource(s)}
+                style={{
+                  flexShrink: 0,
+                  padding: '5px 11px',
+                  borderRadius: 20,
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  border: `1px solid ${isActive ? activeBorder : 'var(--shail-border-subtle)'}`,
+                  background: isActive ? activeBg : 'transparent',
+                  color: isActive ? color : 'var(--shail-text-muted)',
+                  transition: 'all 0.12s',
+                }}
+              >
                 {s === 'all' ? 'All sources' : SOURCE_LABEL[s]}
               </button>
             );
           })}
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ width: 1, background: 'var(--shail-border-subtle)', flexShrink: 0, margin: '0 2px' }} />
           {DATE_OPTS.map(opt => {
             const isActive = date === opt.key;
             return (
-              <button key={opt.key} onClick={() => setDate(opt.key)} style={{ padding: '5px 12px', borderRadius: 20, fontSize: 11, fontWeight: 500, cursor: 'pointer', border: `1px solid ${isActive ? '#7c3aed50' : '#1a1a1a'}`, background: isActive ? '#7c3aed18' : 'transparent', color: isActive ? '#a78bfa' : '#444', transition: 'all 0.1s' }}>
+              <button
+                key={opt.key}
+                onClick={() => setDate(opt.key)}
+                style={{
+                  flexShrink: 0,
+                  padding: '5px 11px',
+                  borderRadius: 20,
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  border: `1px solid ${isActive ? 'var(--shail-evidence)50' : 'var(--shail-border-subtle)'}`,
+                  background: isActive ? 'var(--shail-evidence-soft)' : 'transparent',
+                  color: isActive ? 'var(--shail-evidence)' : 'var(--shail-text-muted)',
+                  transition: 'all 0.12s',
+                }}
+              >
                 {opt.label}
               </button>
             );
           })}
         </div>
+        {v2 && (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', overflowX: 'auto', scrollbarWidth: 'none' } as React.CSSProperties}>
+            <span style={{ fontSize: 10, color: 'var(--shail-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0, marginRight: 2 }}>State</span>
+            {(['all', 'captured', 'partial', 'replayable', 'failed'] as const).map(st => {
+              const isActive = stateFacet === st;
+              return (
+                <button
+                  key={st}
+                  onClick={() => setStateFacet(st)}
+                  style={{
+                    flexShrink: 0,
+                    padding: '4px 10px',
+                    borderRadius: 14,
+                    fontSize: 10,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    border: `1px solid ${isActive ? 'var(--shail-border-strong)' : 'var(--shail-border-subtle)'}`,
+                    background: isActive ? 'var(--shail-bg-raised)' : 'transparent',
+                    color: isActive ? 'var(--shail-text-primary)' : 'var(--shail-text-muted)',
+                    textTransform: 'capitalize',
+                    transition: 'all 0.12s',
+                  }}
+                >
+                  {st}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bulk actions */}
       {records.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-          <button onClick={handleSelectAll} style={{ fontSize: 11, color: '#444', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+          <button
+            onClick={handleSelectAll}
+            style={{ fontSize: 11, color: 'var(--shail-text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          >
             {selected.size === records.length ? 'Deselect all' : 'Select all'}
           </button>
           {selected.size > 0 && (
-            <button onClick={handleBulkDelete} disabled={bulkDeleting} style={{ fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: 0, opacity: bulkDeleting ? 0.5 : 1 }}>
+            <button
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              style={{ fontSize: 11, color: 'var(--shail-danger)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, opacity: bulkDeleting ? 0.5 : 1 }}
+            >
               {bulkDeleting ? 'Deleting…' : `Delete ${selected.size} selected`}
             </button>
           )}
@@ -146,45 +269,67 @@ export function Memories() {
       )}
 
       {/* List */}
-      <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 48, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 48, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {loading && records.length === 0 && (
           Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} style={{ height: 72, borderRadius: 8, background: '#0d0d0d', border: '1px solid #111', animation: 'pulse 1.5s ease-in-out infinite' }} />
+            <div key={i} style={{ height: 80, borderRadius: 10, background: 'var(--shail-bg-raised)', border: '1px solid var(--shail-border-subtle)', animation: 'pulse 1.5s ease-in-out infinite' }} />
           ))
         )}
         {!loading && records.length === 0 && (
-          <div style={{ marginTop: 80, textAlign: 'center', color: '#252525', fontSize: 14 }}>No memories found</div>
+          <div style={{ marginTop: 80, textAlign: 'center', color: 'var(--shail-text-muted)', fontSize: 14, opacity: 0.5 }}>
+            No memories found
+          </div>
         )}
         {records.map(r => (
-          <MemoryCard
+          <div
             key={r.id}
-            record={r}
-            selected={selected.has(r.id)}
-            onSelect={handleSelect}
-            onDeleted={handleDeleted}
-            onDeleteRequest={(id) => setDeleteModal({ ids: [id], label: 'Delete this memory? This cannot be undone.' })}
-            showCheckbox
-            hasBlueprint={blueprintIds.has(r.id)}
-          />
+            onClick={(e) => {
+              if (!v2) return;
+              const tag = (e.target as HTMLElement).tagName;
+              if (tag === 'INPUT' || tag === 'BUTTON' || tag === 'A') return;
+              handleOpenInspector(r.id);
+            }}
+            style={{ cursor: v2 ? 'pointer' : 'default', position: 'relative' }}
+          >
+            {v2 && r.state && (
+              <div style={{ position: 'absolute', top: 10, right: 10, zIndex: 1 }}>
+                <StateBadge state={r.state as MemoryState} size="xs" />
+              </div>
+            )}
+            <MemoryCard
+              record={r}
+              selected={selected.has(r.id)}
+              onSelect={handleSelect}
+              onDeleted={handleDeleted}
+              onDeleteRequest={(id) => setDeleteModal({ ids: [id], label: 'Delete this memory? This cannot be undone.' })}
+              showCheckbox
+              hasBlueprint={blueprintIds.has(r.id)}
+            />
+          </div>
         ))}
       </div>
 
+      {/* Delete confirm modal */}
       {deleteModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
-          <div style={{ background: '#0d0d0d', border: '1px solid #1f1f1f', borderRadius: 12, padding: '32px 36px', maxWidth: 400, width: '90%' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 500, color: '#fff' }}>Delete memory?</h3>
-            <p style={{ margin: '0 0 28px', fontSize: 13, color: '#555', lineHeight: 1.6 }}>{deleteModal.label}</p>
+          <div style={{ background: 'var(--shail-bg-surface)', border: '1px solid var(--shail-border-subtle)', borderRadius: 12, padding: '28px 32px', maxWidth: 400, width: '90%' }}>
+            <h3 style={{ margin: '0 0 10px', fontSize: 16, fontWeight: 600, color: 'var(--shail-text-primary)' }}>
+              Delete memory?
+            </h3>
+            <p style={{ margin: '0 0 24px', fontSize: 13, color: 'var(--shail-text-secondary)', lineHeight: 1.6 }}>
+              {deleteModal.label}
+            </p>
             <div style={{ display: 'flex', gap: 10 }}>
               <button
                 onClick={() => setDeleteModal(null)}
-                style={{ flex: 1, padding: '9px 0', borderRadius: 7, fontSize: 13, cursor: 'pointer', background: 'transparent', border: '1px solid #1e1e1e', color: '#555' }}
+                style={{ flex: 1, height: 36, borderRadius: 8, fontSize: 13, cursor: 'pointer', background: 'transparent', border: '1px solid var(--shail-border-subtle)', color: 'var(--shail-text-secondary)' }}
               >
                 Cancel
               </button>
               <button
                 onClick={() => handleConfirmDelete(deleteModal.ids)}
                 disabled={bulkDeleting}
-                style={{ flex: 1, padding: '9px 0', borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: 'pointer', background: '#ef4444', border: 'none', color: '#fff', opacity: bulkDeleting ? 0.6 : 1 }}
+                style={{ flex: 1, height: 36, borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', background: 'var(--shail-danger)', border: 'none', color: '#fff', opacity: bulkDeleting ? 0.6 : 1 }}
               >
                 {bulkDeleting ? 'Deleting…' : 'Delete'}
               </button>

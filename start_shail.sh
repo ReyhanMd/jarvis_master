@@ -18,6 +18,7 @@ LOG_DIR="$ROOT/logs"
 PID_DIR="$ROOT/run"
 VENV="$ROOT/services_env"
 ENV_FILE="$ROOT/.env"
+PYTHON_BIN="$VENV/bin/python3"
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
@@ -29,7 +30,7 @@ check_port() {
 wait_for_port() {
   local name=$1
   local port=$2
-  local max_wait=30
+  local max_wait="${3:-30}"
   local waited=0
   echo -n "⏳ Waiting for $name on port $port"
   until check_port "$port" || [ $waited -ge $max_wait ]; do
@@ -61,7 +62,10 @@ if [ ! -d "$VENV" ]; then
   log "Creating Python venv at $VENV"
   python3 -m venv "$VENV"
 fi
-source "$VENV/bin/activate"
+if [ ! -x "$PYTHON_BIN" ]; then
+  log "Python venv is missing its interpreter at $PYTHON_BIN"
+  exit 1
+fi
 
 # Install dependencies if needed
 install_service() {
@@ -69,7 +73,7 @@ install_service() {
   if [ ! -f "$ROOT/services/$svc/.installed" ]; then
     log "Installing dependencies for $svc"
     pushd "$ROOT/services/$svc" >/dev/null
-    pip install -q -r requirements.txt
+    "$PYTHON_BIN" -m pip install -q -r requirements.txt
     touch .installed
     popd >/dev/null
   fi
@@ -98,8 +102,8 @@ else
     # Sprint 6: switched chat default to quantized Gemma 3 4B (Q4_K_M).
     # Saves ~7 GB resident vs. gemma4:e4b. Vision deferred — Ghost Cursor
     # pulls llava:7b on first use only.
-    ollama pull gemma3:4b-it-q4_K_M --quiet || true
-    ollama pull nomic-embed-text --quiet || true
+    ollama pull gemma3:4b-it-q4_K_M || true
+    ollama pull nomic-embed-text || true
   else
     log "WARNING: ollama not found. Install from https://ollama.com"
   fi
@@ -135,9 +139,17 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   # scripts/install_watchdog.sh for why.
   WATCHDOG_DIR="$ROOT/native/mac/MemoryWatchdog"
   WATCHDOG_INSTALLED="$HOME/Applications/SHAIL/MemoryWatchdog"
+  WATCHDOG_MODULE_CACHE="$WATCHDOG_DIR/.module-cache"
   if [ -d "$WATCHDOG_DIR" ] && command -v swift >/dev/null 2>&1; then
     log "Building MemoryWatchdog…"
-    if (cd "$WATCHDOG_DIR" && swift build -c release --quiet); then
+    rm -rf "$WATCHDOG_DIR/.build"
+    mkdir -p "$WATCHDOG_MODULE_CACHE"
+    if (
+      cd "$WATCHDOG_DIR" && \
+      CLANG_MODULE_CACHE_PATH="$WATCHDOG_MODULE_CACHE" \
+      SWIFT_DRIVER_CLANG_MODULE_CACHE_PATH="$WATCHDOG_MODULE_CACHE" \
+      swift build -c release --quiet
+    ); then
       bash "$ROOT/scripts/install_watchdog.sh" >>"$LOG_DIR/memory_watchdog.log" 2>&1 || true
       if [ -f "$WATCHDOG_INSTALLED" ]; then
         log "Starting MemoryWatchdog (installed path)"
@@ -158,29 +170,30 @@ start_service() {
   local dir=$2
   local cmd=$3
   local port=$4
+  local max_wait="${5:-30}"
   log "Starting $name"
   pushd "$dir" >/dev/null
-  eval "$cmd" >"$LOG_DIR/${name}.log" 2>&1 &
+  "$PYTHON_BIN" $cmd >"$LOG_DIR/${name}.log" 2>&1 &
   local pid=$!
   popd >/dev/null
   echo $pid >"$PID_DIR/${name}.pid"
-  wait_for_port "$name" "$port"
+  wait_for_port "$name" "$port" "$max_wait"
 }
 
 # Start ui_twin as background process (no HTTP server, just WebSocket consumer)
 log "Starting ui_twin (background service)"
 pushd "$ROOT/services/ui_twin" >/dev/null
-python service.py >"$LOG_DIR/ui_twin.log" 2>&1 &
+"$PYTHON_BIN" service.py >"$LOG_DIR/ui_twin.log" 2>&1 &
 UI_TWIN_PID=$!
 popd >/dev/null
 echo $UI_TWIN_PID >"$PID_DIR/ui_twin.pid"
 log "ui_twin started (PID: $UI_TWIN_PID) - runs in background, no HTTP port"
 
 # Start action_executor on port 8080
-start_service "action_executor" "$ROOT/services/action_executor" "python service.py" 8080
-start_service "vision" "$ROOT/services/vision" "python service.py" 8081
-start_service "rag_retriever" "$ROOT/services/rag_retriever" "python service.py" 8082
-start_service "planner" "$ROOT/services/planner" "python service.py" 8083
+start_service "action_executor" "$ROOT/services/action_executor" "service.py" 8080
+start_service "vision" "$ROOT/services/vision" "service.py" 8081
+start_service "rag_retriever" "$ROOT/services/rag_retriever" "service.py" 8082 60
+start_service "planner" "$ROOT/services/planner" "service.py" 8083
 
 # Start Shail API
 log "Starting Shail API"
@@ -188,7 +201,7 @@ if check_port 8000; then
   log "Port 8000 already in use — assuming Shail API already running"
 else
   pushd "$ROOT/apps/shail" >/dev/null
-  uvicorn main:app --host 127.0.0.1 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
+  "$PYTHON_BIN" -m uvicorn main:app --host 127.0.0.1 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
   API_PID=$!
   popd >/dev/null
   echo $API_PID >"$PID_DIR/shail_api.pid"
@@ -205,7 +218,7 @@ fi
 # Start task worker
 log "Starting task worker"
 pushd "$ROOT" >/dev/null
-python -m shail.workers.task_worker >"$LOG_DIR/task_worker.log" 2>&1 &
+"$PYTHON_BIN" -m shail.workers.task_worker >"$LOG_DIR/task_worker.log" 2>&1 &
 WORKER_PID=$!
 popd >/dev/null
 echo $WORKER_PID >"$PID_DIR/task_worker.pid"

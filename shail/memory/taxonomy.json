@@ -1,0 +1,80 @@
+{
+  "version": "1.0",
+  "domains": {
+    "extensions": {
+      "py":    "domain:backend",
+      "ts":    "domain:frontend",
+      "tsx":   "domain:frontend",
+      "js":    "domain:frontend",
+      "jsx":   "domain:frontend",
+      "swift": "domain:native",
+      "rs":    "domain:systems",
+      "go":    "domain:backend",
+      "sh":    "domain:devops",
+      "yaml":  "domain:devops",
+      "yml":   "domain:devops",
+      "json":  "domain:config",
+      "md":    "domain:docs",
+      "sql":   "domain:data",
+      "ipynb": "domain:ml"
+    },
+    "keywords": {
+      "langgraph":    "domain:agentic",
+      "langchain":    "domain:agentic",
+      "faiss":        "domain:retrieval",
+      "chroma":       "domain:retrieval",
+      "pgvector":     "domain:retrieval",
+      "embedding":    "domain:retrieval",
+      "oauth":        "domain:auth",
+      "jwt":          "domain:auth",
+      "fastapi":      "domain:backend",
+      "react":        "domain:frontend",
+      "swiftui":      "domain:native",
+      "pytorch":      "domain:ml",
+      "tensorflow":   "domain:ml",
+      "docker":       "domain:devops",
+      "kubernetes":   "domain:devops",
+      "git":          "domain:devops",
+      "github":       "domain:devops",
+      "websocket":    "domain:realtime",
+      "redis":        "domain:infra",
+      "postgres":     "domain:data",
+      "sqlite":       "domain:data"
+    }
+  },
+  "agent_types": {
+    "code":     "memory_type:execution",
+    "research": "memory_type:knowledge",
+    "bio":      "memory_type:knowledge",
+    "robo":     "memory_type:execution",
+    "plasma":   "memory_type:execution",
+    "friend":   "memory_type:interaction",
+    "unknown":  "memory_type:unclassified"
+  },
+  "task_modes": {
+    "auto":     "mode:auto",
+    "code":     "mode:code",
+    "research": "mode:research",
+    "bio":      "mode:bio",
+    "robo":     "mode:robo",
+    "plasma":   "mode:plasma"
+  },
+  "projects": {
+    "shail":    ["project:shail",  "domain:agentic"],
+    "jarvis":   ["project:shail",  "domain:agentic"],
+    "armaan":   ["project:armaan"],
+    "arman":    ["project:armaan"],
+    "reyhan":   ["project:personal"]
+  },
+  "inheritance": {
+    "domain:agentic":   ["domain:backend"],
+    "domain:native":    ["domain:frontend"],
+    "domain:ml":        ["domain:backend"],
+    "domain:retrieval": ["domain:backend"],
+    "project:shail":    ["org:reyhan"]
+  },
+  "status_tags": {
+    "completed": "status:completed",
+    "failed":    "status:failed"
+  }
+}

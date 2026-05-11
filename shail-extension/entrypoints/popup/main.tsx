@@ -62,11 +62,16 @@ function extractPageContent(): PageInfo {
 
 // ─── Popup ────────────────────────────────────────────────────────────────────
 
+const KEY_CAPTURE       = 'shail_capture_enabled';
+const KEY_PAUSED_CONVOS = 'shail_paused_conversations';
+
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 function Popup() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  const [captureEnabled, setCaptureEnabled] = useState<boolean>(true);
+  const [pausedConvos, setPausedConvos] = useState<string[]>([]);
   const [stats, setStats] = useState<StatsResult | null>(null);
   const [pageInfo, setPageInfo] = useState<PageInfo | null>(null);
   const [pageStatus, setPageStatus] = useState<'loading' | 'ready' | 'already_saved' | 'denied' | 'unavailable'>('loading');
@@ -97,6 +102,12 @@ function Popup() {
       setPinnedAscentId((r['shail_pinned_ascent'] as string) ?? null);
     });
 
+    // Capture state
+    chrome.storage.local.get([KEY_CAPTURE, KEY_PAUSED_CONVOS]).then(r => {
+      setCaptureEnabled((r[KEY_CAPTURE] as boolean) ?? true);
+      setPausedConvos((r[KEY_PAUSED_CONVOS] as string[]) ?? []);
+    });
+
     // Page scrape
     chrome.tabs.query({ active: true, currentWindow: true }).then(async tabs => {
       const tab = tabs[0];
@@ -120,6 +131,20 @@ function Popup() {
       } catch { setPageStatus('unavailable'); }
     });
   }, []);
+
+  const handleToggleCapture = useCallback(async () => {
+    const next = !captureEnabled;
+    setCaptureEnabled(next);
+    await chrome.storage.local.set({ [KEY_CAPTURE]: next });
+    // Sync badge state via background
+    chrome.runtime.sendMessage({ type: 'SYNC_PAUSE_BADGE', enabled: next }).catch(() => {});
+  }, [captureEnabled]);
+
+  const handleUnpauseConvo = useCallback(async (convId: string) => {
+    const next = pausedConvos.filter(id => id !== convId);
+    setPausedConvos(next);
+    await chrome.storage.local.set({ [KEY_PAUSED_CONVOS]: next });
+  }, [pausedConvos]);
 
   const handleSave = useCallback(async () => {
     if (!pageInfo) return;
@@ -180,11 +205,28 @@ function Popup() {
           <div style={{ fontSize: 9, color: '#22c55e', letterSpacing: '0.1em', fontFamily: MONO }}>MEMORY · FOR THE WEB</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {/* Pause / resume toggle */}
+          <button
+            onClick={handleToggleCapture}
+            title={captureEnabled ? 'Pause capture (Ctrl+Shift+P)' : 'Resume capture (Ctrl+Shift+P)'}
+            style={{
+              padding: '3px 7px', fontSize: 10, borderRadius: 4, cursor: 'pointer', border: '1px solid',
+              fontFamily: MONO, letterSpacing: '0.05em',
+              background: captureEnabled ? 'transparent' : 'rgba(245,158,11,0.12)',
+              color: captureEnabled ? '#555' : '#f59e0b',
+              borderColor: captureEnabled ? '#333' : 'rgba(245,158,11,0.4)',
+            }}
+          >
+            {captureEnabled ? '⏸' : '▶'}
+          </button>
+          {/* Status dot */}
           {backendOk === null
             ? <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#333' }} />
-            : backendOk
-              ? <><div style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e' }} /><span style={{ fontSize: 9, color: '#22c55e', fontFamily: MONO }}>ACTIVE</span></>
-              : <><div style={{ width: 6, height: 6, borderRadius: '50%', background: '#ef4444' }} /><span style={{ fontSize: 9, color: '#ef4444', fontFamily: MONO }}>OFFLINE</span></>
+            : !captureEnabled
+              ? <><div style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b' }} /><span style={{ fontSize: 9, color: '#f59e0b', fontFamily: MONO }}>PAUSED</span></>
+              : backendOk
+                ? <><div style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e' }} /><span style={{ fontSize: 9, color: '#22c55e', fontFamily: MONO }}>ACTIVE</span></>
+                : <><div style={{ width: 6, height: 6, borderRadius: '50%', background: '#ef4444' }} /><span style={{ fontSize: 9, color: '#ef4444', fontFamily: MONO }}>OFFLINE</span></>
           }
         </div>
       </div>
@@ -308,6 +350,33 @@ function Popup() {
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+
+        {/* ── PAUSED CHATS ── */}
+        {pausedConvos.length > 0 && (
+          <div>
+            <div style={{ fontSize: 9, color: '#f59e0b', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>
+              PAUSED CHATS ({pausedConvos.length})
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {pausedConvos.map(convId => (
+                <div key={convId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: '#0d0d0d', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 6 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 10, color: '#888', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: MONO }}>
+                      {convId.slice(0, 20)}…
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleUnpauseConvo(convId)}
+                    title="Resume capturing this chat"
+                    style={{ padding: '2px 7px', fontSize: 9, background: 'transparent', border: '1px solid #333', borderRadius: 4, color: '#555', cursor: 'pointer', fontFamily: MONO, flexShrink: 0 }}
+                  >
+                    ▶ resume
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
         )}

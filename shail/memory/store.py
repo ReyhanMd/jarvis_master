@@ -24,12 +24,20 @@ CREATE TABLE IF NOT EXISTS tasks (
 """
 
 
+_schema_initialized = False
+
+
 def _conn():
+    global _schema_initialized
     settings = get_settings()
     os.makedirs(os.path.dirname(settings.sqlite_path), exist_ok=True)
-    cx = sqlite3.connect(settings.sqlite_path)
-    # Use executescript() to run multiple CREATE TABLE statements
-    cx.executescript(SCHEMA)
+    cx = sqlite3.connect(settings.sqlite_path, timeout=30.0, check_same_thread=False)
+    cx.execute("PRAGMA journal_mode=WAL")
+    cx.execute("PRAGMA busy_timeout=30000")
+    cx.execute("PRAGMA synchronous=NORMAL")
+    if not _schema_initialized:
+        cx.executescript(SCHEMA)
+        _schema_initialized = True
     return cx
 
 

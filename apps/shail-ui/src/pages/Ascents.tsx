@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, AscentDetail, AscentListResponse, AscentSummary, DeliverableItem } from '../api';
 import { NewAscentModal } from '../components/NewAscentModal';
+import { EmptyState } from '../components/primitives';
 
 const MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
 const CARD = { background: '#0d0d0d', border: '1px solid #161616', borderRadius: 9 } as const;
@@ -282,12 +283,11 @@ export function Ascents() {
       </div>
 
       {ascents.length === 0 && (
-        <div style={{ ...CARD, padding: 40, textAlign: 'center' }}>
-          <div style={{ fontSize: 14, color: '#666', marginBottom: 8 }}>No ascents yet.</div>
-          <div style={{ fontSize: 12, color: '#3a3a3a' }}>
-            Click "New ascent" to define your first goal — Gemma will break it into deliverables and todos.
-          </div>
-        </div>
+        <EmptyState
+          title="No ascents yet"
+          hint='Click "New ascent" to define your first goal — SHAIL will break it into deliverables and todos using your memories as context.'
+          action={{ label: '+ New ascent', onClick: () => setShowNew(true) }}
+        />
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 14 }}>

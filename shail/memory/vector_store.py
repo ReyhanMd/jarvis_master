@@ -36,6 +36,9 @@ class VectorStore:
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    def delete_ids(self, ids: List[str]) -> None:
+        raise NotImplementedError
+
 
 class PgVectorStore(VectorStore):
     """Postgres + pgvector implementation."""
@@ -167,6 +170,20 @@ class PgVectorStore(VectorStore):
             conn.close()
         return results
 
+    def delete_ids(self, ids: List[str]) -> None:
+        if not ids:
+            return
+        conn = self._connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {self.table} WHERE id = ANY(%s)",
+                        (ids,),
+                    )
+        finally:
+            conn.close()
+
 
 class ChromaVectorStore(VectorStore):
     """Chroma fallback store (persisted locally)."""
@@ -245,6 +262,10 @@ class ChromaVectorStore(VectorStore):
         for doc, meta, rid, dist in zip(docs, metas, ids, dists):
             results.append({"id": rid, "content": doc, "metadata": meta or {}, "score": dist})
         return results
+
+    def delete_ids(self, ids: List[str]) -> None:
+        if ids:
+            self.collection.delete(ids=ids)
 
 
 def get_vector_store(store_type: str, *, dsn: str, chroma_path: str, dim: int) -> VectorStore:

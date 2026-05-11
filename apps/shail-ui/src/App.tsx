@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { queryClient } from './lib/queryClient';
 import { Sidebar } from './components/Sidebar';
+import { EvidenceRail } from './components/EvidenceRail';
+import { MemoryInspector } from './components/MemoryInspector';
+import { flag } from './lib/featureFlags';
 import { Basecamp } from './pages/Basecamp';
 import { Ascents } from './pages/Ascents';
 import { Routes as RoutesPage } from './pages/Routes';
@@ -12,6 +17,7 @@ import { Connections } from './pages/Connections';
 import { Services } from './pages/Services';
 import { Settings } from './pages/Settings';
 import { ExportImport } from './pages/ExportImport';
+import { Graphify } from './pages/Graphify';
 import { AuthGate } from './pages/AuthGate';
 import { AnonymousSyncModal } from './components/AnonymousSyncModal';
 import { getApiKey } from './auth';
@@ -57,14 +63,18 @@ export function App() {
   }, []);
 
   if (!authed) {
-    return <AuthGate onAuth={handleAuth} />;
+    return (
+      <QueryClientProvider client={queryClient}>
+        <AuthGate onAuth={handleAuth} />
+      </QueryClientProvider>
+    );
   }
 
   return (
-    <>
+    <QueryClientProvider client={queryClient}>
       <div style={{ display: 'flex', height: '100vh', background: '#000', color: '#fff', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', overflow: 'hidden' }}>
         <Sidebar />
-        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
           <Routes>
             <Route path="/"            element={<Basecamp />} />
             <Route path="/ascents"     element={<Ascents />} />
@@ -73,15 +83,19 @@ export function App() {
             <Route path="/chat"        element={<Chat />} />
             <Route path="/chat/:sessionId" element={<Chat />} />
             <Route path="/memories"    element={<Memories />} />
+            <Route path="/memories/:id" element={<Memories />} />
             <Route path="/graph"       element={<Graph />} />
             <Route path="/connections" element={<Connections />} />
             <Route path="/services"    element={<Services />} />
             <Route path="/settings"    element={<Settings />} />
             <Route path="/export"      element={<ExportImport />} />
+            <Route path="/graphify"    element={<Graphify />} />
           </Routes>
         </main>
+        {flag('ui_v2') && <EvidenceRail />}
       </div>
+      {flag('ui_v2') && <MemoryInspector />}
       {showSyncModal && <AnonymousSyncModal onDone={handleSyncDone} />}
-    </>
+    </QueryClientProvider>
   );
 }

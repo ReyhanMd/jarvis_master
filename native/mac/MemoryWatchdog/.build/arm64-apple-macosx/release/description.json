@@ -19,67 +19,67 @@
   "swiftCommands" : {
     "C.MemoryWatchdog-arm64-apple-macosx26.0-release.module" : {
       "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
-      "fileList" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources",
-      "importPath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules",
+      "fileList" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources",
+      "importPath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules",
       "inputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources"
         }
       ],
       "isLibrary" : false,
       "moduleName" : "MemoryWatchdog",
-      "moduleOutputPath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules/MemoryWatchdog.swiftmodule",
+      "moduleOutputPath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules/MemoryWatchdog.swiftmodule",
       "objects" : [
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/AXTextScraper.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ActiveAppMonitor.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ClipboardWatcher.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ContentExtractor.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/FSEventsWatcher.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ImportanceScorer.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MemoryClient.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MenuBarApp.swift.o",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/main.swift.o"
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/AXTextScraper.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ActiveAppMonitor.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ClipboardWatcher.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ContentExtractor.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/FSEventsWatcher.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ImportanceScorer.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MemoryClient.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MenuBarApp.swift.o",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/main.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -93,12 +93,13 @@
         "-DSWIFT_PACKAGE",
         "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
         "-module-cache-path",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/ModuleCache",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/ModuleCache",
         "-parseable-output",
         "-Xfrontend",
         "-entry-point-function-name",
         "-Xfrontend",
         "MemoryWatchdog_main",
+        "-color-diagnostics",
         "-swift-version",
         "5",
         "-framework",
@@ -139,62 +140,62 @@
         "-package-name",
         "memorywatchdog"
       ],
-      "outputFileMapPath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/output-file-map.json",
+      "outputFileMapPath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/output-file-map.json",
       "outputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/AXTextScraper.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/AXTextScraper.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ActiveAppMonitor.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ActiveAppMonitor.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ClipboardWatcher.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ClipboardWatcher.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ContentExtractor.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ContentExtractor.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/FSEventsWatcher.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/FSEventsWatcher.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ImportanceScorer.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ImportanceScorer.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MemoryClient.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MemoryClient.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MenuBarApp.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MenuBarApp.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/main.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/main.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules/MemoryWatchdog.swiftmodule"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules/MemoryWatchdog.swiftmodule"
         }
       ],
       "prepareForIndexing" : false,
       "sources" : [
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift",
-        "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift"
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift",
+        "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift"
       ],
-      "tempsPath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build",
+      "tempsPath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build",
       "wholeModuleOptimization" : true
     }
   },
@@ -209,17 +210,17 @@
       "-package-name",
       "memorywatchdog",
       "-c",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift",
       "-I",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/Modules",
       "-target",
       "arm64-apple-macosx13.0",
       "-whole-module-optimization",
@@ -231,12 +232,13 @@
       "-DSWIFT_PACKAGE",
       "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
       "-module-cache-path",
-      "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/ModuleCache",
+      "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/ModuleCache",
       "-parseable-output",
       "-Xfrontend",
       "-entry-point-function-name",
       "-Xfrontend",
       "MemoryWatchdog_main",
+      "-color-diagnostics",
       "-swift-version",
       "5",
       "-framework",
@@ -297,7 +299,7 @@
     }
   },
   "writeCommands" : {
-    "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources" : {
+    "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -306,44 +308,44 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/AXTextScraper.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift"
         }
       ],
-      "outputFilePath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources"
+      "outputFilePath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/sources"
     },
-    "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.product/Objects.LinkFileList" : {
+    "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.product/Objects.LinkFileList" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -352,44 +354,44 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/AXTextScraper.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/AXTextScraper.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ActiveAppMonitor.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ActiveAppMonitor.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ClipboardWatcher.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ClipboardWatcher.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ContentExtractor.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ContentExtractor.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/FSEventsWatcher.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/FSEventsWatcher.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ImportanceScorer.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/ImportanceScorer.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MemoryClient.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MemoryClient.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MenuBarApp.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/MenuBarApp.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/main.swift.o"
+          "name" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.build/main.swift.o"
         }
       ],
-      "outputFilePath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.product/Objects.LinkFileList"
+      "outputFilePath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog.product/Objects.LinkFileList"
     },
-    "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt" : {
+    "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt" : {
       "alwaysOutOfDate" : true,
       "inputs" : [
         {
@@ -401,7 +403,7 @@
           "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
         }
       ],
-      "outputFilePath" : "/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+      "outputFilePath" : "/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
     }
   }
 }

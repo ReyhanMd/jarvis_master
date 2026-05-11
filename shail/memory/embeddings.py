@@ -51,3 +51,12 @@ def embed_query(query: str) -> List[float]:
     """Embed single query string."""
     results = embed_texts([query])
     return results[0] if results else []
+
+
+def is_zero_vector(embedding: List[float]) -> bool:
+    """True if every component is ~0. embed_texts returns these on Ollama
+    failure; upserting them poisons Chroma with records that match nothing.
+    """
+    if not embedding:
+        return True
+    return all(abs(v) < 1e-9 for v in embedding)

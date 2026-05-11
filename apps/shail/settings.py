@@ -45,6 +45,10 @@ class Settings(BaseModel):
     rag_chunk_size: int = Field(default=int(os.getenv("RAG_CHUNK_SIZE", "800")))
     rag_chunk_overlap: int = Field(default=int(os.getenv("RAG_CHUNK_OVERLAP", "120")))
     rag_embedding_dim: int = Field(default=int(os.getenv("RAG_EMBEDDING_DIM", "768")))
+    capture_artifact_dir: str = Field(default=os.getenv(
+        "SHAIL_CAPTURE_ARTIFACT_DIR",
+        os.path.expanduser("~/Library/Application Support/SHAIL/capture_artifacts"),
+    ))
 
     # macOS memory tiers
     macos_memory_root: str = Field(default=os.getenv(
@@ -95,6 +99,58 @@ class Settings(BaseModel):
     # will get empty strings instead of AttributeErrors.
     gemini_api_key: str = Field(default="")
     gemini_model: str   = Field(default="")
+
+    # Retrieval-evolution feature flags. All default OFF. Land dark, flip via env.
+    shail_exact_index_write:    bool = Field(default=os.getenv("SHAIL_EXACT_INDEX_WRITE", "false").lower() == "true")
+    shail_hybrid_retrieval:     bool = Field(default=os.getenv("SHAIL_HYBRID_RETRIEVAL", "false").lower() == "true")
+    shail_context_packet:       bool = Field(default=os.getenv("SHAIL_CONTEXT_PACKET", "false").lower() == "true")
+    shail_capture_chunking:     bool = Field(default=os.getenv("SHAIL_CAPTURE_CHUNKING", "false").lower() == "true")
+    shail_blueprint_versioning: bool = Field(default=os.getenv("SHAIL_BLUEPRINT_VERSIONING", "false").lower() == "true")
+    shail_rerank:               bool = Field(default=os.getenv("SHAIL_RERANK", "false").lower() == "true")
+    shail_retrieval_debug:      bool = Field(default=os.getenv("SHAIL_RETRIEVAL_DEBUG", "false").lower() == "true")
+    capture_artifacts_enabled:        bool = Field(default=os.getenv("SHAIL_CAPTURE_ARTIFACTS_ENABLED", "false").lower() == "true")
+    capture_v2_enabled:               bool = Field(default=os.getenv("SHAIL_CAPTURE_V2_ENABLED", "false").lower() == "true")
+    semantic_chunk_promotion_enabled: bool = Field(default=os.getenv("SHAIL_SEMANTIC_CHUNK_PROMOTION_ENABLED", "false").lower() == "true")
+    pdf_extraction_enabled:           bool = Field(default=os.getenv("SHAIL_PDF_EXTRACTION_ENABLED", "false").lower() == "true")
+    github_diff_capture_enabled:      bool = Field(default=os.getenv("SHAIL_GITHUB_DIFF_CAPTURE_ENABLED", "false").lower() == "true")
+    structured_dom_capture_enabled:   bool = Field(default=os.getenv("SHAIL_STRUCTURED_DOM_CAPTURE_ENABLED", "false").lower() == "true")
+    capture_bundle_version:           str = Field(default=os.getenv("SHAIL_CAPTURE_BUNDLE_VERSION", "capture-v1.0.0"))
+
+    # ── SuperMemory Phase 1: Hybrid Local/Global Retrieval ───────────────
+    supermemory_api_url:              str   = Field(default=os.getenv("SUPERMEMORY_API_URL", "https://api.supermemory.ai"))
+    supermemory_api_key:              str   = Field(default=os.getenv("SUPERMEMORY_API_KEY", ""))
+    supermemory_use_global:           bool  = Field(default=os.getenv("SHAIL_USE_GLOBAL_MEMORY", "false").lower() == "true")
+    supermemory_fallback_threshold:   int   = Field(default=int(os.getenv("SUPERMEMORY_FALLBACK_THRESHOLD", "3")))
+    supermemory_timeout_sec:          float = Field(default=float(os.getenv("SUPERMEMORY_TIMEOUT_SEC", "5.0")))
+    retrieval_strategy:               str   = Field(default=os.getenv("SHAIL_RETRIEVAL_STRATEGY", "local_only"))  # local_only|global_only|hybrid
+
+    # ── SuperMemory Phase 2: Shared RAG Cache ───────────────────────────
+    cache_enabled:                    bool  = Field(default=os.getenv("SHAIL_CACHE_ENABLED", "false").lower() == "true")
+    cache_backend:                    str   = Field(default=os.getenv("SHAIL_CACHE_BACKEND", "sqlite"))  # redis|sqlite|disk
+    cache_ttl_sec:                    int   = Field(default=int(os.getenv("SHAIL_CACHE_TTL_SEC", "3600")))
+    cache_sqlite_path:                str   = Field(default=os.getenv("SHAIL_CACHE_SQLITE_PATH", os.path.expanduser("~/Library/Application Support/SHAIL/retrieval_cache.db")))
+    cache_disk_dir:                   str   = Field(default=os.getenv("SHAIL_CACHE_DISK_DIR", os.path.expanduser("~/Library/Application Support/SHAIL/cache")))
+
+    # ── SuperMemory Phase 3: Auto-Ingest Generated Outputs ──────────────
+    ingest_generated_outputs:         bool  = Field(default=os.getenv("SHAIL_AUTO_INGEST", "false").lower() == "true")
+    ingest_quality_threshold:         float = Field(default=float(os.getenv("SHAIL_INGEST_QUALITY_THRESHOLD", "0.6")))
+    ingest_max_queue_size:            int   = Field(default=int(os.getenv("SHAIL_INGEST_QUEUE_SIZE", "100")))
+    memory_quality_score_weights:     dict  = Field(default_factory=lambda: {"has_artifacts": 0.3, "no_error": 0.4, "length": 0.3})
+
+    # ── SuperMemory Phase 5: Cross-Agent Shared Memory ───────────────────
+    enable_shared_context:            bool  = Field(default=os.getenv("SHAIL_SHARED_CONTEXT", "false").lower() == "true")
+    shared_context_backend:           str   = Field(default=os.getenv("SHAIL_SHARED_CONTEXT_BACKEND", "sqlite"))  # sqlite|redis
+    shared_context_ttl_hours:         int   = Field(default=int(os.getenv("SHAIL_SHARED_CONTEXT_TTL_HOURS", "24")))
+    shared_context_sqlite_path:       str   = Field(default=os.getenv("SHAIL_SC_SQLITE_PATH", os.path.expanduser("~/Library/Application Support/SHAIL/shared_context.db")))
+
+    # ── SuperMemory Phase 6: Observability + Metrics ─────────────────────
+    metrics_enabled:                  bool  = Field(default=os.getenv("SHAIL_METRICS_ENABLED", "true").lower() == "true")
+    trace_enabled:                    bool  = Field(default=os.getenv("SHAIL_TRACE_ENABLED", "false").lower() == "true")
+    otel_endpoint:                    str   = Field(default=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
+
+    # ── SuperMemory Phase 7: Hierarchical Taxonomy Engine ────────────────
+    taxonomy_enabled:                 bool  = Field(default=os.getenv("SHAIL_TAXONOMY_ENABLED", "true").lower() == "true")
+    taxonomy_config_path:             str   = Field(default=os.getenv("SHAIL_TAXONOMY_CONFIG", os.path.expanduser("~/.config/SHAIL/taxonomy.json")))
 
 
 _settings: Optional[Settings] = None

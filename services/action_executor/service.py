@@ -267,7 +267,7 @@ class ActionExecutorService:
         
         return screenshot_id
     
-    async def start(self, host: str = "0.0.0.0", port: int = 8080):
+    async def start(self, host: str = "127.0.0.1", port: int = 8080):
         """Start the Action Executor HTTP API"""
         import uvicorn
         
@@ -285,4 +285,3 @@ if __name__ == "__main__":
         asyncio.run(service.start())
     except KeyboardInterrupt:
         logger.info("👋 Action Executor service stopped")
-

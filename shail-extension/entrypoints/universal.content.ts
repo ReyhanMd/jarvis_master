@@ -1,6 +1,38 @@
 import { Readability } from '@mozilla/readability';
-import { isCaptureAllowed, makeCaptureId, sendCapture } from '../src/lib/capture';
+import {
+  buildPdfBytesCandidate,
+  buildPdfStubCandidate,
+  buildStructuredDomCandidate,
+  isCaptureAllowed,
+  makeCaptureId,
+  sendCapture,
+} from '../src/lib/capture';
 import { showCapturePrompt } from '../src/lib/notify';
+import { extractHtmlTables } from '../src/lib/extractors/table';
+import { extractDashboardCards } from '../src/lib/extractors/dashboard';
+import { extractSvgCharts } from '../src/lib/extractors/svg_chart';
+
+const PDF_BYTES_CAP = 25 * 1024 * 1024; // 25 MB
+
+async function fetchPdfBase64(url: string): Promise<string | null> {
+  try {
+    const resp = await fetch(url, { credentials: 'include' });
+    if (!resp.ok) return null;
+    const len = Number(resp.headers.get('content-length') || '0');
+    if (len > PDF_BYTES_CAP) return null;
+    const buf = await resp.arrayBuffer();
+    if (buf.byteLength > PDF_BYTES_CAP) return null;
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)) as unknown as number[]);
+    }
+    return btoa(binary);
+  } catch {
+    return null;
+  }
+}
 
 // Domains handled by dedicated adapters — skip them here
 const AI_SITE_PATTERNS = [
@@ -41,16 +73,12 @@ export default defineContentScript({
         lower.includes('.pdf?')
       ) {
         if (!await isCaptureAllowed(url)) return;
-        const customId = await makeCaptureId(url, url);
-        sendCapture({
-          customId,
-          eventType: 'pdf_doc',
-          sourceApp: 'web',
-          sourceUrl: url,
-          timestamp: new Date().toISOString(),
-          title: document.title || url.split('/').pop() || 'PDF',
-          pageContent: `PDF: ${url}`,
-        });
+        const stub = `PDF: ${url}`;
+        const base64 = await fetchPdfBase64(url);
+        const candidate = base64
+          ? await buildPdfBytesCandidate({ base64, contentStub: stub })
+          : await buildPdfStubCandidate({ contentStub: stub });
+        await sendCapture(candidate);
         return; // no further page capture needed
       }
 
@@ -176,19 +204,41 @@ export default defineContentScript({
       // Policy check: if domain is DENY, bail before showing any UI
       if (!await isCaptureAllowed(url)) return;
 
+      // Structured DOM capture (tables, dashboard cards, SVG charts).
+      // Built alongside the article candidate; sent only on user save.
+      let structuredCandidate: Awaited<ReturnType<typeof buildStructuredDomCandidate>> = null;
+      try {
+        const tables = extractHtmlTables(document);
+        const cards = extractDashboardCards(document);
+        const charts = extractSvgCharts(document);
+        structuredCandidate = await buildStructuredDomCandidate({
+          pageContent: textContent,
+          tables,
+          cards,
+          charts,
+        });
+      } catch {
+        structuredCandidate = null;
+      }
+
       // Show save/skip banner — never auto-send for web pages
       showCapturePrompt({
         title:     title || url,
         sourceApp: 'web',
-        onSave: () => sendCapture({
-          customId,
-          eventType: 'page_visit',
-          sourceApp: 'web',
-          sourceUrl: url,
-          timestamp: new Date().toISOString(),
-          title,
-          pageContent: textContent,
-        }),
+        onSave: () => {
+          sendCapture({
+            customId,
+            eventType: 'page_visit',
+            sourceApp: 'web',
+            sourceUrl: url,
+            timestamp: new Date().toISOString(),
+            title,
+            pageContent: textContent,
+          });
+          if (structuredCandidate) {
+            sendCapture(structuredCandidate);
+          }
+        },
         onSkip: () => {},
       });
     }

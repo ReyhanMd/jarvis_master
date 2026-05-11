@@ -544,7 +544,7 @@ Result: {plan.result_summary}
         except Exception as e:
             logger.warning(f"Failed to store episodic memory: {e}")
     
-    async def start(self, host: str = "0.0.0.0", port: int = 8083):
+    async def start(self, host: str = "127.0.0.1", port: int = 8083):
         """Start the Planner HTTP API"""
         import uvicorn
         
@@ -562,4 +562,3 @@ if __name__ == "__main__":
         asyncio.run(service.start())
     except KeyboardInterrupt:
         logger.info("👋 Planner service stopped")
-

@@ -79,10 +79,18 @@ export default defineContentScript({
       // swallow — the bridge must never crash the page
     }
 
+    // ── Re-entrancy guard ──────────────────────────────────────────────
+    // Without this flag, the two listeners below create an infinite loop:
+    //   storage.onChanged → writePage() → dispatches 'shail-auth-updated'
+    //   → onLocalUpdate() → writeExt() → triggers storage.onChanged → …
+    // The flag breaks the cycle: if we're already syncing, skip.
+    let _syncing = false;
+
     // Watch extension storage for changes (e.g. user signs in via Options
     // page or sidepanel). Mirror to localStorage and notify the dashboard.
     const offStorage = browser.storage.onChanged.addListener((changes, area) => {
       if (area !== 'sync') return;
+      if (_syncing) return;
       const updates: Partial<Record<AuthKey, string | null>> = {};
       let touched = false;
       for (const k of KEYS) {
@@ -91,7 +99,11 @@ export default defineContentScript({
           touched = true;
         }
       }
-      if (touched) writePage(updates);
+      if (touched) {
+        _syncing = true;
+        writePage(updates);
+        _syncing = false;
+      }
     });
 
     // Watch page-side localStorage changes. The 'storage' event only fires
@@ -100,14 +112,20 @@ export default defineContentScript({
     // (done in apps/shail-ui/src/auth.ts) — we listen for that here too.
     const onStorageEvt = async (e: StorageEvent) => {
       if (!e.key || !(KEYS as readonly string[]).includes(e.key)) return;
+      if (_syncing) return;
+      _syncing = true;
       const vals = readPage();
       await writeExt(vals);
+      _syncing = false;
     };
     window.addEventListener('storage', onStorageEvt);
 
     const onLocalUpdate = async () => {
+      if (_syncing) return;
+      _syncing = true;
       const vals = readPage();
       await writeExt(vals);
+      _syncing = false;
     };
     window.addEventListener('shail-auth-updated', onLocalUpdate as EventListener);
 

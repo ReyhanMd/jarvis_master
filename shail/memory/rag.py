@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 
 from apps.shail.settings import get_settings
-from shail.memory.embeddings import embed_texts, embed_query, EmbeddingError
+from shail.memory.embeddings import embed_texts, embed_query, EmbeddingError, is_zero_vector
 from shail.memory.vector_store import (
     EmbeddingRecord,
     VectorStore,
@@ -157,14 +157,27 @@ def ingest(paths: Optional[List[str]] = None, records: Optional[List[Dict[str, A
         logger.error("Embedding failed: %s", exc)
         return 0
 
+    valid_records: List[EmbeddingRecord] = []
     for rec, emb in zip(embedding_records, embeddings):
+        if is_zero_vector(emb):
+            logger.error(
+                "Dropping zero-vector record id=%s namespace=%s — Ollama likely down",
+                rec.id, rec.namespace,
+            )
+            continue
         rec.embedding = emb
-        # Ensure namespace in metadata for Chroma filter
         rec.metadata = rec.metadata or {}
         rec.metadata.setdefault("namespace", rec.namespace)
+        valid_records.append(rec)
 
-    store.upsert(embedding_records)
-    return len(embedding_records)
+    if not valid_records:
+        logger.error(
+            "ingest aborted: all %d embeddings were zero vectors", len(embedding_records),
+        )
+        return 0
+
+    store.upsert(valid_records)
+    return len(valid_records)
 
 
 def search(

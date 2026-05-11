@@ -48,6 +48,12 @@ class MemoryItem(BaseModel):
     pinned: bool = False
     score: Optional[float] = None
     content: Optional[str] = None
+    # v2 manifesto fields — additive, defaulted for legacy records.
+    confidence: Optional[float] = None
+    state: Optional[str] = None              # captured | partial | replayable | failed | synced | local-only
+    parentId: Optional[str] = None           # lineage: previous version
+    version: int = 1
+    fidelity: Optional[float] = None         # 0..1 — capture completeness heuristic
 
 
 class MemoryPage(BaseModel):
@@ -149,6 +155,29 @@ def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = Fals
     body = doc[body_start + 2:] if body_start >= 0 else (doc or "")
     summary = meta.get("summary") or body[:400]
 
+    # v2 fields: derive defaults so legacy records render without backfill.
+    completeness_raw = meta.get("artifactCompleteness") or meta.get("completeness")
+    state = meta.get("state")
+    if not state:
+        if completeness_raw == "partial":
+            state = "partial"
+        elif meta.get("synced") == "true":
+            state = "synced"
+        else:
+            state = "captured"
+    try:
+        confidence = float(meta.get("importance_score", meta.get("confidence", 0.5)))
+    except Exception:
+        confidence = 0.5
+    try:
+        fidelity = float(meta.get("fidelity")) if meta.get("fidelity") is not None else None
+    except Exception:
+        fidelity = None
+    try:
+        version = int(meta.get("version", 1))
+    except Exception:
+        version = 1
+
     return MemoryItem(
         id=rid,
         customId=meta.get("customId", rid),
@@ -161,6 +190,11 @@ def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = Fals
         tags=_parse_tags(meta.get("tags")),
         pinned=meta.get("pinned", "false") == "true",
         content=doc if include_content else None,
+        confidence=confidence,
+        state=state,
+        parentId=meta.get("parentId") or None,
+        version=version,
+        fidelity=fidelity,
     )
 
 
@@ -252,6 +286,60 @@ async def get_memory(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     return _record_to_item(ids[0], docs[0] or "", metas[0] or {}, include_content=True)
+
+
+@dashboard_router.get("/memories/{memory_id}/related", response_model=List[MemoryItem])
+async def related_memories(
+    memory_id: str,
+    limit: int = 10,
+    user_id: str = Depends(get_current_user),
+) -> List[MemoryItem]:
+    """Return memories related to a given memory.
+
+    Cheap heuristic v1: same sourceUrl OR shared tag OR same conversationId.
+    Falls back to same sourceApp + closest-by-time if nothing else hits.
+    Excludes the source memory itself.
+    """
+    records = _get_all_user_records(user_id)
+    target = next(((rid, doc, meta) for rid, doc, meta in records if rid == memory_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    _, _, t_meta = target
+    t_meta = t_meta or {}
+    t_url = t_meta.get("sourceUrl", "")
+    t_conv = t_meta.get("conversationId")
+    t_tags = set(_parse_tags(t_meta.get("tags")))
+    t_app = t_meta.get("sourceApp", "")
+    t_ts = t_meta.get("timestamp", "")
+
+    scored: list[tuple[float, str, str, dict]] = []
+    for rid, doc, meta in records:
+        if rid == memory_id:
+            continue
+        meta = meta or {}
+        score = 0.0
+        if t_conv and meta.get("conversationId") == t_conv:
+            score += 4.0
+        if t_url and meta.get("sourceUrl", "") == t_url:
+            score += 2.0
+        overlap = t_tags & set(_parse_tags(meta.get("tags")))
+        if overlap:
+            score += 1.0 + 0.25 * len(overlap)
+        if t_app and meta.get("sourceApp") == t_app:
+            score += 0.25
+        if score > 0:
+            scored.append((score, rid, doc, meta))
+
+    if not scored:
+        # Fallback: closest-by-time within same sourceApp.
+        same_app = [(rid, doc, meta) for rid, doc, meta in records
+                    if rid != memory_id and (meta or {}).get("sourceApp") == t_app]
+        same_app.sort(key=lambda r: abs(((r[2] or {}).get("timestamp", "") > t_ts) - 0))
+        scored = [(0.1, rid, doc, meta) for rid, doc, meta in same_app[:limit]]
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [_record_to_item(rid, doc, meta) for _, rid, doc, meta in scored[:limit]]
 
 
 @dashboard_router.patch("/memories/{memory_id}", response_model=MemoryItem)
@@ -486,6 +574,7 @@ class MemoryGraph(BaseModel):
     edges: List[GraphEdge]
 
 
+@dashboard_router.get("/graph", response_model=MemoryGraph)
 @dashboard_router.get("/memories/graph", response_model=MemoryGraph)
 async def memory_graph(
     user_id: str = Depends(get_current_user),

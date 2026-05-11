@@ -298,7 +298,7 @@ class RAGRetrieverService:
         
         logger.info(f"✅ Deleted namespace: {namespace}")
     
-    async def start(self, host: str = "0.0.0.0", port: int = 8082):
+    async def start(self, host: str = "127.0.0.1", port: int = 8082):
         """Start the RAG Retriever HTTP API"""
         import uvicorn
         
@@ -316,4 +316,3 @@ if __name__ == "__main__":
         asyncio.run(service.start())
     except KeyboardInterrupt:
         logger.info("👋 RAG Retriever service stopped")
-

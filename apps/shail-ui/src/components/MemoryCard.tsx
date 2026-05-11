@@ -21,6 +21,8 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
   const [copied, setCopied]       = useState(false);
   const [blueprint, setBlueprint] = useState<Blueprint | null>(null);
   const [bpStatus, setBpStatus]   = useState<'idle' | 'loading' | 'pending' | 'ready' | 'none'>('idle');
+  const [showPreview, setShowPreview] = useState(false);
+  const hoverTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const color = SOURCE_COLOR[record.sourceApp] ?? '#6b7280';
   const label = SOURCE_LABEL[record.sourceApp] ?? record.sourceApp;
@@ -84,18 +86,71 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
   const ts = new Date(record.timestamp);
   const timeStr = ts.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 
+  // Derive health badge from state + eventType
+  const stateBadge = (() => {
+    const s = record.state;
+    if (s === 'replayable') return { label: 'Replayable', color: 'var(--shail-success)', bg: 'rgba(95,210,154,0.1)' };
+    if (s === 'trusted')    return { label: 'Trusted',    color: 'var(--shail-evidence)', bg: 'var(--shail-evidence-soft)' };
+    if (s === 'partial' || s === 'incomplete') return { label: 'Partial', color: 'var(--shail-warning)', bg: 'rgba(224,182,90,0.1)' };
+    if (record.eventType === 'ai_conversation') return { label: 'Conversation', color: 'var(--shail-evidence)', bg: 'var(--shail-evidence-soft)' };
+    return null;
+  })();
+
   return (
     <div
       style={{
-        background: selected ? '#0f0f0f' : '#0a0a0a',
-        border: `1px solid ${selected ? '#2a2a2a' : '#161616'}`,
-        borderRadius: 8,
-        padding: '16px 18px',
+        position: 'relative',
+        background: selected ? 'var(--shail-bg-raised)' : 'var(--shail-bg-surface)',
+        border: `1px solid ${selected ? 'var(--shail-border-strong)' : 'var(--shail-border-subtle)'}`,
+        borderRadius: 10,
+        padding: '14px 16px',
         cursor: 'pointer',
-        transition: 'border-color 0.1s',
+        transition: 'border-color 0.15s, background 0.15s',
+      }}
+      onMouseEnter={e => {
+        (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--shail-border-strong)';
+        if (!expanded) {
+          hoverTimer.current = setTimeout(() => setShowPreview(true), 400);
+        }
+      }}
+      onMouseLeave={e => {
+        (e.currentTarget as HTMLDivElement).style.borderColor = selected ? 'var(--shail-border-strong)' : 'var(--shail-border-subtle)';
+        setShowPreview(false);
+        if (hoverTimer.current) clearTimeout(hoverTimer.current);
       }}
       onClick={handleExpand}
     >
+      {/* Hover preview popover */}
+      {showPreview && !expanded && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 'calc(100% + 10px)',
+            width: 240,
+            zIndex: 50,
+            background: 'var(--shail-bg-surface)',
+            border: '1px solid var(--shail-border-strong)',
+            borderRadius: 10,
+            padding: '12px 14px',
+            pointerEvents: 'none',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          }}
+          onClick={e => e.stopPropagation()}
+        >
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--shail-text-primary)', marginBottom: 6, lineHeight: 1.35 }}>
+            {record.title || record.sourceUrl}
+          </div>
+          {stateBadge && (
+            <span style={{ fontSize: 9, color: stateBadge.color, background: stateBadge.bg, borderRadius: 4, padding: '1px 6px', marginBottom: 6, display: 'inline-block' }}>
+              {stateBadge.label}
+            </span>
+          )}
+          <div style={{ fontSize: 11, color: 'var(--shail-text-secondary)', lineHeight: 1.6 }}>
+            {(record.summary || '').slice(0, 180)}{(record.summary || '').length > 180 ? '…' : ''}
+          </div>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
         {showCheckbox && (
           <input
@@ -103,39 +158,55 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
             checked={!!selected}
             onChange={e => { e.stopPropagation(); onSelect?.(record.id, e.target.checked); }}
             onClick={e => e.stopPropagation()}
-            style={{ marginTop: 2, accentColor: '#ef4444', flexShrink: 0 }}
+            style={{ marginTop: 2, accentColor: 'var(--shail-evidence)', flexShrink: 0 }}
           />
         )}
 
         {/* Source chip */}
         <span style={{
-          fontSize: 10,
+          fontSize: 11,
           fontWeight: 600,
-          letterSpacing: '0.04em',
           color,
           background: color + '18',
           border: `1px solid ${color}30`,
-          borderRadius: 4,
-          padding: '2px 6px',
+          borderRadius: 5,
+          padding: '2px 8px',
           flexShrink: 0,
           marginTop: 1,
         }}>
           {label}
         </span>
 
+        {/* State / health badge */}
+        {stateBadge && (
+          <span style={{
+            fontSize: 10,
+            fontWeight: 600,
+            color: stateBadge.color,
+            background: stateBadge.bg,
+            border: `1px solid ${stateBadge.color}30`,
+            borderRadius: 5,
+            padding: '2px 8px',
+            flexShrink: 0,
+            marginTop: 1,
+          }}>
+            {stateBadge.label}
+          </span>
+        )}
+
         {/* Blueprint badge — visible only when extraction has produced a row */}
         {hasBlueprint && (
           <span
             title="Structured blueprint extracted from this memory"
             style={{
-              fontSize: 9,
+              fontSize: 10,
               fontWeight: 700,
-              letterSpacing: '0.08em',
-              color: '#8ab4f8',
-              background: '#0c1424',
-              border: '1px solid #1a2c4a',
-              borderRadius: 4,
-              padding: '2px 6px',
+              letterSpacing: '0.06em',
+              color: 'var(--shail-evidence)',
+              background: 'var(--shail-evidence-soft)',
+              border: '1px solid rgba(138,138,212,0.2)',
+              borderRadius: 5,
+              padding: '2px 8px',
               flexShrink: 0,
               marginTop: 1,
               fontFamily: MONO_F,
@@ -147,17 +218,17 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-            <p style={{ margin: 0, fontSize: 13, fontWeight: 500, color: '#e8e8e8', lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+            <p style={{ margin: 0, fontSize: 13, fontWeight: 500, color: 'var(--shail-text-primary)', lineHeight: 1.4, letterSpacing: '-0.01em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
               {record.title || record.sourceUrl}
             </p>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-              <span style={{ fontSize: 11, color: '#3a3a3a' }}>{timeStr}</span>
+              <span style={{ fontSize: 11, color: 'var(--shail-text-muted)' }}>{timeStr}</span>
               <button
                 onClick={handleDelete}
                 disabled={deleting}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2a2a2a', fontSize: 13, padding: '0 2px', lineHeight: 1, transition: 'color 0.1s' }}
-                onMouseEnter={e => (e.currentTarget.style.color = '#ef4444')}
-                onMouseLeave={e => (e.currentTarget.style.color = '#2a2a2a')}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--shail-border-strong)', fontSize: 13, padding: '0 2px', lineHeight: 1, transition: 'color 0.1s' }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--shail-danger)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'var(--shail-border-strong)')}
                 title="Delete"
               >
                 {deleting ? '…' : '×'}
@@ -166,7 +237,7 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
           </div>
 
           {!expanded && (
-            <p style={{ margin: '6px 0 0', fontSize: 12, color: '#444', lineHeight: 1.55, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+            <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--shail-text-secondary)', lineHeight: 1.6, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
               {record.summary}
             </p>
           )}
@@ -177,7 +248,7 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
       {record.tags?.length > 0 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10, paddingLeft: showCheckbox ? 26 : 0 }}>
           {record.tags.map(t => (
-            <span key={t} style={{ fontSize: 10, color: '#333', background: '#141414', border: '1px solid #1e1e1e', borderRadius: 3, padding: '1px 6px' }}>
+            <span key={t} style={{ fontSize: 11, color: 'var(--shail-text-muted)', background: 'var(--shail-bg-raised)', border: '1px solid var(--shail-border-subtle)', borderRadius: 4, padding: '1px 7px' }}>
               {t}
             </span>
           ))}
@@ -188,9 +259,9 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
       {expanded && (
         <div style={{ marginTop: 14, paddingLeft: showCheckbox ? 26 : 0 }} onClick={e => e.stopPropagation()}>
           {loadingContent ? (
-            <div style={{ color: '#2a2a2a', fontSize: 12 }}>Loading…</div>
+            <div style={{ color: 'var(--shail-text-muted)', fontSize: 12 }}>Loading…</div>
           ) : (
-            <pre style={{ margin: 0, fontSize: 12, color: '#555', lineHeight: 1.65, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 320, overflowY: 'auto', fontFamily: 'inherit' }}>
+            <pre style={{ margin: 0, fontSize: 12, color: 'var(--shail-text-secondary)', lineHeight: 1.65, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 320, overflowY: 'auto', fontFamily: 'inherit' }}>
               {content}
             </pre>
           )}
@@ -207,9 +278,9 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
               href={record.sourceUrl}
               target="_blank"
               rel="noreferrer"
-              style={{ fontSize: 11, color: '#333', textDecoration: 'none', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              onMouseEnter={e => (e.currentTarget.style.color = '#fff')}
-              onMouseLeave={e => (e.currentTarget.style.color = '#333')}
+              style={{ fontSize: 11, color: 'var(--shail-text-muted)', textDecoration: 'none', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--shail-text-primary)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--shail-text-muted)')}
             >
               {record.sourceUrl} ↗
             </a>
@@ -222,8 +293,8 @@ export function MemoryCard({ record, selected, onSelect, onDeleted, onDeleteRequ
               }}
               style={{
                 padding: '4px 12px', fontSize: 11, borderRadius: 5, cursor: 'pointer',
-                background: 'none', border: '1px solid #1e1e1e', flexShrink: 0,
-                color: copied ? '#22c55e' : '#333', fontFamily: MONO_F,
+                background: 'none', border: '1px solid var(--shail-border-subtle)', flexShrink: 0,
+                color: copied ? 'var(--shail-success)' : 'var(--shail-text-muted)', fontFamily: MONO_F,
                 transition: 'color 0.1s',
               }}
             >
@@ -250,14 +321,14 @@ function BlueprintPanel({
 
   const HEADER = (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, marginBottom: 6 }}>
-      <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', color: '#666', fontFamily: MONO_F }}>
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--shail-evidence)', fontFamily: MONO_F }}>
         BLUEPRINT
       </span>
-      <span style={{ flex: 1, height: 1, background: '#161616' }} />
+      <span style={{ flex: 1, height: 1, background: 'var(--shail-border-subtle)' }} />
       {status === 'pending' && (
         <button
           onClick={onRetry}
-          style={{ fontSize: 10, color: '#666', background: 'none', border: '1px solid #1e1e1e', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontFamily: MONO_F }}
+          style={{ fontSize: 10, color: 'var(--shail-text-muted)', background: 'none', border: '1px solid var(--shail-border-subtle)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontFamily: MONO_F }}
         >
           retry
         </button>
@@ -269,7 +340,7 @@ function BlueprintPanel({
     return (
       <>
         {HEADER}
-        <div style={{ fontSize: 11, color: '#2a2a2a' }}>Reading…</div>
+        <div style={{ fontSize: 11, color: 'var(--shail-text-muted)' }}>Reading…</div>
       </>
     );
   }
@@ -277,7 +348,7 @@ function BlueprintPanel({
     return (
       <>
         {HEADER}
-        <div style={{ fontSize: 11, color: '#444', lineHeight: 1.5 }}>
+        <div style={{ fontSize: 11, color: 'var(--shail-text-secondary)', lineHeight: 1.6 }}>
           Still extracting — blueprints generate in the background after capture.
           Tap retry in a moment.
         </div>
@@ -286,17 +357,22 @@ function BlueprintPanel({
   }
   if (!blueprint) return null;
 
+  // decisions can be string | { statement: string; ... }
+  const decisionTexts = blueprint.decisions.map(d =>
+    typeof d === 'string' ? d : d.statement
+  );
+
   const sections: { label: string; items: string[]; tone: string }[] = [
-    { label: 'Decisions',     items: blueprint.decisions,     tone: '#8ab4f8' },
-    { label: 'Open questions', items: blueprint.open_questions, tone: '#f59e0b' },
-    { label: 'Next actions',  items: blueprint.next_actions,  tone: '#22c55e' },
+    { label: 'Decisions',      items: decisionTexts,              tone: 'var(--shail-evidence)' },
+    { label: 'Open questions', items: blueprint.open_questions,   tone: 'var(--shail-warning)' },
+    { label: 'Next actions',   items: blueprint.next_actions,     tone: 'var(--shail-success)' },
   ];
 
   return (
     <>
       {HEADER}
       {blueprint.summary && (
-        <div style={{ fontSize: 12, color: '#888', lineHeight: 1.55, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: 'var(--shail-text-secondary)', lineHeight: 1.6, marginBottom: 10 }}>
           {blueprint.summary}
         </div>
       )}
@@ -306,7 +382,7 @@ function BlueprintPanel({
             {s.label.toUpperCase()}
           </div>
           {s.items.map((item, i) => (
-            <div key={i} style={{ fontSize: 12, color: '#aaa', lineHeight: 1.55, marginBottom: 2, paddingLeft: 10, position: 'relative' }}>
+            <div key={i} style={{ fontSize: 12, color: 'var(--shail-text-secondary)', lineHeight: 1.6, marginBottom: 2, paddingLeft: 10, position: 'relative' }}>
               <span style={{ position: 'absolute', left: 0, color: s.tone }}>·</span>
               {item}
             </div>
@@ -315,13 +391,13 @@ function BlueprintPanel({
       ))}
       {blueprint.questions_answered.length > 0 && (
         <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 10, color: '#666', fontFamily: MONO_F, letterSpacing: '0.06em', marginBottom: 4 }}>
+          <div style={{ fontSize: 10, color: 'var(--shail-text-muted)', fontFamily: MONO_F, letterSpacing: '0.06em', marginBottom: 4 }}>
             Q&amp;A
           </div>
           {blueprint.questions_answered.map((qa, i) => (
-            <div key={i} style={{ fontSize: 12, color: '#888', lineHeight: 1.55, marginBottom: 6, paddingLeft: 10 }}>
-              <span style={{ color: '#ccc' }}>Q.</span> {qa.q}
-              {qa.a && <><br/><span style={{ color: '#666' }}>A.</span> {qa.a}</>}
+            <div key={i} style={{ fontSize: 12, color: 'var(--shail-text-secondary)', lineHeight: 1.6, marginBottom: 6, paddingLeft: 10 }}>
+              <span style={{ color: 'var(--shail-text-primary)' }}>Q.</span> {qa.q}
+              {qa.a && <><br/><span style={{ color: 'var(--shail-text-muted)' }}>A.</span> {qa.a}</>}
             </div>
           ))}
         </div>
@@ -329,7 +405,7 @@ function BlueprintPanel({
       {blueprint.key_entities.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
           {blueprint.key_entities.map(e => (
-            <span key={e} style={{ fontSize: 10, color: '#888', background: '#0f0f0f', border: '1px solid #1f1f1f', borderRadius: 4, padding: '2px 8px', fontFamily: MONO_F }}>
+            <span key={e} style={{ fontSize: 10, color: 'var(--shail-text-muted)', background: 'var(--shail-bg-raised)', border: '1px solid var(--shail-border-subtle)', borderRadius: 4, padding: '2px 8px', fontFamily: MONO_F }}>
               {e}
             </span>
           ))}

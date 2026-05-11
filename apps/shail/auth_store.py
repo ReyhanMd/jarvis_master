@@ -43,9 +43,11 @@ def _verify_password(plain: str, hashed: str) -> bool:
 
 def _conn() -> sqlite3.Connection:
     path = get_settings().sqlite_path
-    con = sqlite3.connect(path, check_same_thread=False)
+    con = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 

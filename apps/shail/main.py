@@ -52,6 +52,7 @@ from apps.shail.native_health import register_native_health
 from apps.shail.browser_api import browser_router
 from apps.shail.ascents_api import ascents_router
 from apps.shail.chat_api import chat_router
+from apps.shail.mcp_api import mcp_router
 from apps.shail.auth_api import auth_router, get_user_or_local
 from apps.shail.auth_store import init_auth_db
 from apps.shail.memory_dashboard_api import dashboard_router
@@ -126,6 +127,7 @@ app.include_router(google_auth_router, prefix="/auth/google", tags=["google-auth
 app.include_router(browser_router, prefix="/browser", tags=["browser"])
 app.include_router(ascents_router, prefix="/browser/ascents", tags=["ascents"])
 app.include_router(chat_router, prefix="/browser/chat", tags=["chat"])
+app.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 app.include_router(dashboard_router, prefix="/api/v2", tags=["dashboard"])
 app.include_router(memory_router, prefix="/memory", tags=["memory"])
 app.include_router(path_idx_router, prefix="/path-index", tags=["path-index"])
@@ -170,10 +172,43 @@ def bootstrap_mcp():
     except Exception as exc:
         logger.warning("Blueprint DB init failed: %s", exc)
     try:
+        from apps.shail.capture_store import init_capture_store
+        init_capture_store()
+        logger.info("Capture store initialized")
+    except Exception as exc:
+        logger.warning("Capture store init failed: %s", exc)
+    try:
         register_all_tools(get_provider())
         logger.info("MCP registration completed on startup")
     except Exception as exc:
         logger.warning("MCP registration failed: %s", exc)
+    # Phase 6: init metrics
+    try:
+        from shail.observability.metrics import init_metrics
+        init_metrics()
+    except Exception as exc:
+        logger.warning("Metrics init failed: %s", exc)
+    # Phase 3: start ingest queue drain worker
+    try:
+        from shail.memory.ingest_queue import get_ingest_queue
+        get_ingest_queue().start()
+    except Exception as exc:
+        logger.warning("IngestQueue start failed: %s", exc)
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    """Prometheus metrics endpoint (Phase 6)."""
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from fastapi.responses import Response
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    except ImportError:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("# prometheus_client not installed\n", status_code=200)
+    except Exception as exc:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(f"# metrics error: {exc}\n", status_code=500)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -838,5 +873,4 @@ async def _startup_index():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
 

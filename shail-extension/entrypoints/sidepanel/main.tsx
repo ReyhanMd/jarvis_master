@@ -8,6 +8,7 @@ import './style.css';
 const MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
 const BASE = 'http://localhost:8000';
 const CHAT_HISTORY_KEY = 'shail_sidepanel_chat_history';
+const CHAT_SESSION_KEY = 'shail_sidepanel_session_id';
 
 const SOURCE_APPS: SourceApp[] = ['chatgpt', 'claude', 'gemini', 'perplexity', 'web'];
 const SOURCE_LABEL: Record<SourceApp, string> = { chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini', perplexity: 'Perplexity', web: 'Web' };
@@ -81,19 +82,19 @@ function MemCard({ record, onOpen, onInject, onDelete }: {
   return (
     <div
       onClick={() => !delConfirm && onOpen(record)}
-      style={{ background: '#0d0d0d', border: '1px solid #222', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
+      style={{ background: '#0d0d0d', border: '1px solid #222', borderRadius: 8, overflow: 'hidden', cursor: 'pointer', flex: '0 0 auto' }}
     >
-      <div style={{ padding: '10px 12px' }}>
+      <div style={{ padding: '10px 12px', minHeight: 48 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
           <span style={{ fontSize: 9, color: meta.color, fontFamily: MONO, letterSpacing: '0.06em', fontWeight: 700 }}>{meta.label.toUpperCase()}</span>
           {pinned && <span style={{ fontSize: 9, color: '#f59e0b' }}>📌</span>}
           <span style={{ fontSize: 9, color: '#555', fontFamily: MONO, marginLeft: 'auto' }}>{timeAgo(record.timestamp)}</span>
         </div>
         <div style={{ fontSize: 12, color: '#e5e5e5', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 4, fontWeight: 500 }}>
-          {record.title || record.summary}
+          {record.title || record.summary || record.sourceUrl || 'Untitled memory'}
         </div>
         <div style={{ fontSize: 10, color: '#888', lineHeight: 1.5, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
-          {cleanContentForDisplay(record.summary)}
+          {cleanContentForDisplay(record.summary || record.title || '')}
         </div>
       </div>
       <div
@@ -229,7 +230,7 @@ function BrowseTab() {
       if (date === 'today') after = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
       else if (date === 'week') after = new Date(Date.now() - 7 * 86400000).toISOString();
       else if (date === 'month') after = new Date(Date.now() - 30 * 86400000).toISOString();
-      const r = await api.search({ query: q, k: 100, after, filters: src !== 'all' ? { sourceApp: src } : undefined });
+      const r = await api.search({ query: q, after, filters: src !== 'all' ? { sourceApp: src } : undefined });
       setItems(r.items);
     } catch (err) {
       setError(userFacingError(err));
@@ -239,6 +240,20 @@ function BrowseTab() {
   }, []);
 
   useEffect(() => { doSearch('', 'all', 'all'); }, [doSearch]);
+
+  // Auto-refresh when sidepanel regains visibility (user reopens panel or
+  // switches back to Browse tab). Also listen for the manual refresh event
+  // dispatched by the header's Refresh button.
+  useEffect(() => {
+    const refresh = () => doSearch(query, sourceFilter, dateFilter);
+    const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener('shail:refresh', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('shail:refresh', refresh);
+    };
+  }, [doSearch, query, sourceFilter, dateFilter]);
 
   const handleQueryChange = (q: string) => {
     setQuery(q);
@@ -266,19 +281,42 @@ function BrowseTab() {
     try { await api.deleteMemory(id); setItems(prev => prev.filter(r => r.id !== id)); } catch { /* ignore */ }
   };
 
+  const handleRefresh = () => {
+    doSearch(query, sourceFilter, dateFilter);
+  };
+
   if (opened) return <MemDetail record={opened} onBack={() => setOpened(null)} onInject={r => { handleInject(r); setOpened(null); }} onDelete={handleDelete} />;
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
       {/* Search */}
-      <div style={{ padding: '10px 12px 0' }}>
+      <div style={{ padding: '10px 12px 0', display: 'flex', gap: 8, alignItems: 'stretch' }}>
         <input
           value={query}
           onChange={e => handleQueryChange(e.target.value)}
           placeholder="Search memories…"
-          style={{ width: '100%', padding: '8px 12px', fontSize: 12, background: '#0d0d0d', border: '1px solid #222', borderRadius: 6, color: '#e5e5e5', outline: 'none', boxSizing: 'border-box' }}
+          style={{ flex: 1, minWidth: 0, padding: '8px 12px', fontSize: 12, background: '#0d0d0d', border: '1px solid #222', borderRadius: 6, color: '#e5e5e5', outline: 'none', boxSizing: 'border-box' }}
         />
+        <button
+          onClick={handleRefresh}
+          disabled={loading}
+          title="Reload memories"
+          style={{
+            flexShrink: 0,
+            padding: '0 12px',
+            fontSize: 10,
+            background: 'transparent',
+            border: '1px solid #222',
+            borderRadius: 6,
+            color: loading ? '#444' : '#999',
+            cursor: loading ? 'wait' : 'pointer',
+            fontFamily: MONO,
+            letterSpacing: '0.06em',
+          }}
+        >
+          {loading ? 'LOADING' : 'RELOAD'}
+        </button>
       </div>
 
       {/* Source filter pills */}
@@ -332,11 +370,11 @@ function BrowseTab() {
       )}
 
       {/* Results */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 12px 12px', display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
         {loading && (
           <>
             {[1,2,3].map(i => (
-              <div key={i} style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 8, padding: '10px 12px', height: 74 }}>
+              <div key={i} style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 8, padding: '10px 12px', height: 74, flex: '0 0 auto' }}>
                 <div style={{ height: 10, background: '#1a1a1a', borderRadius: 4, width: '30%', marginBottom: 8, animation: 'pulse 1.5s ease-in-out infinite' }} />
                 <div style={{ height: 12, background: '#1a1a1a', borderRadius: 4, width: '80%', marginBottom: 6, animation: 'pulse 1.5s ease-in-out infinite' }} />
                 <div style={{ height: 10, background: '#1a1a1a', borderRadius: 4, width: '60%', animation: 'pulse 1.5s ease-in-out infinite' }} />
@@ -350,7 +388,9 @@ function BrowseTab() {
           </div>
         )}
         {!loading && items.map(r => (
-          <MemCard key={r.id} record={r} onOpen={setOpened} onInject={handleInject} onDelete={handleDelete} />
+          <div key={r.id} style={{ flex: '0 0 auto' }}>
+            <MemCard record={r} onOpen={setOpened} onInject={handleInject} onDelete={handleDelete} />
+          </div>
         ))}
       </div>
     </div>
@@ -367,24 +407,27 @@ function AskTab() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Load persisted chat history + routes on mount
+  // Load persisted chat history, session ID, and routes on mount
   useEffect(() => {
     getApiKey().then(k => setApiKey(k));
     api.routes().then(r => setRoutes(r.routes.slice(0, 4))).catch(() => {});
-    chrome.storage.local.get(CHAT_HISTORY_KEY).then(r => {
+    chrome.storage.local.get([CHAT_HISTORY_KEY, CHAT_SESSION_KEY]).then(r => {
       const hist = r[CHAT_HISTORY_KEY] as ChatMsg[] | undefined;
       if (hist?.length) setMessages(hist);
+      const sid = r[CHAT_SESSION_KEY] as string | undefined;
+      if (sid) setSessionId(sid);
     });
 
     // Abort stream when tab unmounts (user switches to Browse)
     return () => { abortRef.current?.abort(); abortRef.current = null; };
   }, []);
 
-  // Persist history when messages change
+  // Persist history + session ID when messages change
   useEffect(() => {
     if (messages.length > 0) {
       chrome.storage.local.set({ [CHAT_HISTORY_KEY]: messages.slice(-40) });
@@ -395,7 +438,8 @@ function AskTab() {
 
   const clearHistory = () => {
     setMessages([]);
-    chrome.storage.local.remove(CHAT_HISTORY_KEY);
+    setSessionId(null);
+    chrome.storage.local.remove([CHAT_HISTORY_KEY, CHAT_SESSION_KEY]);
   };
 
   const sendMessage = useCallback(async (q: string) => {
@@ -408,11 +452,10 @@ function AskTab() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const history = messages.map(m => ({ role: m.role, content: m.text }));
       const res = await fetch(`${BASE}/browser/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}) },
-        body: JSON.stringify({ message: userMsg, history }),
+        body: JSON.stringify({ message: userMsg, session_id: sessionId }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) throw new Error('Chat failed');
@@ -569,10 +612,17 @@ function Sidepanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>SHAIL</span>
           <span style={{ fontSize: 9, color: '#22c55e', fontFamily: MONO, letterSpacing: '0.1em' }}>MEMORY</span>
+          <button
+            onClick={() => document.dispatchEvent(new CustomEvent('shail:refresh'))}
+            title="Refresh memories"
+            style={{ marginLeft: 'auto', padding: '3px 8px', fontSize: 13, background: 'transparent', border: '1px solid #222', borderRadius: 5, color: '#666', cursor: 'pointer', lineHeight: 1 }}
+          >
+            ↻
+          </button>
           {!authed && (
             <button
               onClick={() => chrome.runtime.openOptionsPage()}
-              style={{ marginLeft: 'auto', padding: '3px 10px', fontSize: 10, background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 5, color: '#22c55e', cursor: 'pointer' }}
+              style={{ padding: '3px 10px', fontSize: 10, background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 5, color: '#22c55e', cursor: 'pointer' }}
             >
               Sign in
             </button>

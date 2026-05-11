@@ -1,13 +1,13 @@
 ---
 triple:          'arm64-apple-darwin'
-binary-path:     '/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog'
+binary-path:     '/Users/reyhan/shail workspace /jarvis_master/native/mac/MemoryWatchdog/.build/arm64-apple-macosx/release/MemoryWatchdog'
 relocations:
   - { offset: 0x145FE9, size: 0x8, addend: 0x0, symName: _MemoryWatchdog_main, symObjAddr: 0x0, symBinAddr: 0x1000014F0, symSize: 0x2D0 }
-  - { offset: 0x14600D, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog3appSo13NSApplicationCvp', symObjAddr: 0x5D18, symBinAddr: 0x100019520, symSize: 0x0 }
-  - { offset: 0x146027, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog8delegateAA10MenuBarAppCvp', symObjAddr: 0x5D20, symBinAddr: 0x100019528, symSize: 0x0 }
-  - { offset: 0x146064, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog9fsWatcherAA08FSEventsD0Cvp', symObjAddr: 0x5D28, symBinAddr: 0x100019530, symSize: 0x0 }
-  - { offset: 0x1460A1, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog11clipWatcherAA09ClipboardD0Cvp', symObjAddr: 0x5D30, symBinAddr: 0x100019538, symSize: 0x0 }
-  - { offset: 0x1460F4, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog10appMonitorAA09ActiveAppD0Cvp', symObjAddr: 0x5D38, symBinAddr: 0x100019540, symSize: 0x0 }
+  - { offset: 0x14600D, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog3appSo13NSApplicationCvp', symObjAddr: 0x5DD8, symBinAddr: 0x100019520, symSize: 0x0 }
+  - { offset: 0x146027, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog8delegateAA10MenuBarAppCvp', symObjAddr: 0x5DE0, symBinAddr: 0x100019528, symSize: 0x0 }
+  - { offset: 0x146064, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog9fsWatcherAA08FSEventsD0Cvp', symObjAddr: 0x5DE8, symBinAddr: 0x100019530, symSize: 0x0 }
+  - { offset: 0x1460A1, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog11clipWatcherAA09ClipboardD0Cvp', symObjAddr: 0x5DF0, symBinAddr: 0x100019538, symSize: 0x0 }
+  - { offset: 0x1460F4, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog10appMonitorAA09ActiveAppD0Cvp', symObjAddr: 0x5DF8, symBinAddr: 0x100019540, symSize: 0x0 }
   - { offset: 0x14615C, size: 0x8, addend: 0x0, symName: _MemoryWatchdog_main, symObjAddr: 0x0, symBinAddr: 0x1000014F0, symSize: 0x2D0 }
   - { offset: 0x14627A, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdogySScfU_', symObjAddr: 0x2D0, symBinAddr: 0x1000017C0, symSize: 0x24 }
   - { offset: 0x1462B0, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdogy10Foundation12NotificationVYbcfU0_', symObjAddr: 0x2F4, symBinAddr: 0x1000017E4, symSize: 0x174 }
@@ -53,7 +53,7 @@ relocations:
   - { offset: 0x1487D7, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ClipboardWatcherC5startyyFySo7NSTimerCYbcfU_', symObjAddr: 0x158, symBinAddr: 0x1000038F4, symSize: 0x54 }
   - { offset: 0x14888A, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ClipboardWatcherC4poll33_BEB6CB8A9CC0066DCAF225435575635ELLyyF', symObjAddr: 0x1AC, symBinAddr: 0x100003948, symSize: 0x1E8 }
   - { offset: 0x1489F7, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ClipboardWatcherCfD', symObjAddr: 0x394, symBinAddr: 0x100003B30, symSize: 0x2C }
-  - { offset: 0x148B4F, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ContentExtractorO19supportedExtensionsShySSGvpZ', symObjAddr: 0xFF78, symBinAddr: 0x100019548, symSize: 0x0 }
+  - { offset: 0x148B4F, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ContentExtractorO19supportedExtensionsShySSGvpZ', symObjAddr: 0x10048, symBinAddr: 0x100019548, symSize: 0x0 }
   - { offset: 0x148B94, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ContentExtractorO19supportedExtensions_WZ', symObjAddr: 0x0, symBinAddr: 0x100003BC0, symSize: 0x60 }
   - { offset: 0x148C39, size: 0x8, addend: 0x0, symName: '_$ss22_ContiguousArrayBufferV19_uninitializedCount15minimumCapacityAByxGSi_SitcfCs5UInt8V_Tt1gq5', symObjAddr: 0x60, symBinAddr: 0x100003C20, symSize: 0x70 }
   - { offset: 0x148CDF, size: 0x8, addend: 0x0, symName: '_$sSh21_nonEmptyArrayLiteralShyxGSayxG_tcfCSS_Tt0g5Tf4g_n', symObjAddr: 0xD0, symBinAddr: 0x100003C90, symSize: 0x164 }
@@ -96,8 +96,8 @@ relocations:
   - { offset: 0x14CD4D, size: 0x8, addend: 0x0, symName: '_$sSTsE8contains5whereS2b7ElementQzKXE_tKFSaySSG_Tg5', symObjAddr: 0x0, symBinAddr: 0x10000702C, symSize: 0xA4 }
   - { offset: 0x14CEF7, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog16ImportanceScorerO5score4path7contentSfSS_SStFZTf4nnd_n', symObjAddr: 0xA4, symBinAddr: 0x1000070D0, symSize: 0x344 }
   - { offset: 0x14D153, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO4base_WZ', symObjAddr: 0x0, symBinAddr: 0x100007498, symSize: 0xE4 }
-  - { offset: 0x14D177, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO4base10Foundation3URLVvpZ', symObjAddr: 0x6578, symBinAddr: 0x100019550, symSize: 0x0 }
-  - { offset: 0x14D191, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO9onCaptureySScSgvpZ', symObjAddr: 0x6590, symBinAddr: 0x100019568, symSize: 0x0 }
+  - { offset: 0x14D177, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO4base10Foundation3URLVvpZ', symObjAddr: 0x6630, symBinAddr: 0x100019550, symSize: 0x0 }
+  - { offset: 0x14D191, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO9onCaptureySScSgvpZ', symObjAddr: 0x6648, symBinAddr: 0x100019568, symSize: 0x0 }
   - { offset: 0x14D1AB, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO17didShowSignInGate33_31E301FFC478B2BBAFC8EB39F039801BLLSbvpZ', symObjAddr: 0x13E0, symBinAddr: 0x100019468, symSize: 0x0 }
   - { offset: 0x14D1B9, size: 0x8, addend: 0x0, symName: '_$s14MemoryWatchdog0A6ClientO4base_WZ', symObjAddr: 0x0, symBinAddr: 0x100007498, symSize: 0xE4 }
   - { offset: 0x14D2AA, size: 0x8, addend: 0x0, symName: ___swift_project_value_buffer, symObjAddr: 0x8D4, symBinAddr: 0x100007D1C, symSize: 0x18 }

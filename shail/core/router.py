@@ -20,6 +20,28 @@ from shail.integrations.mcp.provider import get_provider
 from shail.integrations.mcp.client import MCPClient
 
 
+def _maybe_enqueue_ingest(result, req) -> None:
+    """Phase 3: fire-and-forget auto-ingest. Never raises."""
+    try:
+        from apps.shail.settings import get_settings
+        if not get_settings().ingest_generated_outputs:
+            return
+        import asyncio
+        from shail.memory.ingest_queue import get_ingest_queue
+        q = get_ingest_queue()
+        # asyncio.ensure_future works when an event loop is running (FastAPI).
+        # In sync contexts (tests) we silently skip rather than block.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(q.enqueue(result, req))
+        except RuntimeError:
+            pass
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).debug("Phase3 ingest enqueue failed: %s", exc)
+
+
 # Initialize agents once (singleton pattern)
 AGENTS = {
     "code": CodeAgent(),
@@ -146,7 +168,11 @@ class ShailCoreRouter:
             result.audit_ref = audit_ref
             result.agent = decision.agent
             result.task_id = task_id
-            
+            result.generated_by = decision.agent  # Phase 3: provenance
+
+            # ── Phase 3: Fire-and-forget auto-ingest ──────────────────── #
+            _maybe_enqueue_ingest(result, req)
+
             # Add routing metadata to summary (if not awaiting approval)
             if result.status != TaskStatus.AWAITING_APPROVAL:
                 # Only add routing info if it's not already in the summary

@@ -1,8 +1,0 @@
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ActiveAppMonitor.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ClipboardWatcher.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ContentExtractor.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/FSEventsWatcher.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/ImportanceScorer.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MemoryClient.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/MenuBarApp.swift
-/Users/reyhan/jarvis_master/native/mac/MemoryWatchdog/Sources/MemoryWatchdog/main.swift

@@ -5,7 +5,18 @@ import {
   ChatMemoryCitation, ChatPastChatCitation, ChatWebSource,
   ChatSessionSummary, StoredCitation, StoredChatMessage,
 } from '../api';
-import { renderWithCitations } from '../components/CitationLink';
+
+// One MCP citation as it arrives over SSE — provider-tagged.
+interface ChatMcpCitation {
+  provider: string;
+  id: string;
+  title: string;
+  snippet: string;
+  url: string | null;
+}
+import { ChatRenderer } from '../components/ChatRenderer';
+import { useUIStore } from '../stores/ui';
+import { flag } from '../lib/featureFlags';
 
 const MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
 const CARD = { background: '#0d0d0d', border: '1px solid #161616', borderRadius: 9 } as const;
@@ -25,6 +36,7 @@ function citationsFromSseSets(
   memories?: ChatMemoryCitation[],
   pastChats?: ChatPastChatCitation[],
   web?: ChatWebSource[],
+  mcp?: ChatMcpCitation[],
 ): StoredCitation[] {
   const out: StoredCitation[] = [];
   for (const m of memories ?? []) out.push({ type: 'memory', id: m.id, title: m.title, score: m.score });
@@ -35,6 +47,10 @@ function citationsFromSseSets(
   (web ?? []).forEach((w, i) => out.push({
     type: 'web', id: String(i + 1), title: w.title, url: w.url, snippet: w.snippet,
   }));
+  for (const c of mcp ?? []) out.push({
+    type: 'mcp', id: c.id, provider: c.provider,
+    title: c.title, snippet: c.snippet, url: c.url ?? undefined,
+  });
   return out;
 }
 
@@ -131,6 +147,7 @@ export function Chat() {
       let memories:  ChatMemoryCitation[]  = [];
       let pastChats: ChatPastChatCitation[] = [];
       let webHits:   ChatWebSource[]        = [];
+      let mcpHits:   ChatMcpCitation[]      = [];
       let resolvedSessionId: string | undefined = activeId;
 
       const reader = res.body.getReader();
@@ -161,6 +178,8 @@ export function Chat() {
             pastChats = evt.items as ChatPastChatCitation[];
           } else if (t === 'web') {
             webHits = evt.items as ChatWebSource[];
+          } else if (t === 'mcp') {
+            mcpHits = evt.items as ChatMcpCitation[];
           }
 
           setTurns(prev => {
@@ -174,11 +193,16 @@ export function Chat() {
               if (evt.fellback) last.fallbackReason = (evt.reason as string) ?? '';
             } else if (t === 'delta') {
               last.content = (last.content || '') + ((evt.text as string) || '');
-            } else if (t === 'memories' || t === 'past_chats' || t === 'web') {
-              last.citations = citationsFromSseSets(memories, pastChats, webHits);
+            } else if (t === 'memories' || t === 'past_chats' || t === 'web' || t === 'mcp') {
+              last.citations = citationsFromSseSets(memories, pastChats, webHits, mcpHits);
             } else if (t === 'done') {
               last.id = evt.message_id as string;
-              last.citations = citationsFromSseSets(memories, pastChats, webHits);
+              last.citations = citationsFromSseSets(memories, pastChats, webHits, mcpHits);
+              if (flag('ui_v2')) {
+                const ui = useUIStore.getState();
+                ui.setLastAnswerCitations(last.citations);
+                if (last.citations.length > 0) ui.setEvidenceRailOpen(true);
+              }
             }
             return next;
           });
@@ -363,14 +387,12 @@ export function Chat() {
                       )}
                     </div>
                   )}
-                  <div style={{
-                    fontSize: 14, color: '#e8e8e8', lineHeight: 1.7,
-                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                  }}>
-                    {t.content
-                      ? renderWithCitations(t.content, t.citations)
-                      : (streaming && i === turns.length - 1 ? '…' : '')}
-                  </div>
+                  {t.content
+                    ? <ChatRenderer content={t.content} citations={t.citations} fontSize={14} />
+                    : (streaming && i === turns.length - 1
+                        ? <span style={{ color: '#555', fontSize: 13 }}>…</span>
+                        : null)}
+
                 </div>
               )}
             </div>

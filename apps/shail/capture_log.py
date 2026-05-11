@@ -33,7 +33,7 @@ MAX_PER_USER = 200
 # user_id at hand still write somewhere.
 ANON_KEY = "__anonymous__"
 
-EVENT_TYPES = {"CAPTURE", "INDEX", "LINK", "RECALL", "PRUNE"}
+EVENT_TYPES = {"CAPTURE", "SESSION_UPDATE", "INDEX", "LINK", "RECALL", "PRUNE", "BLUEPRINT", "MCP_FETCH"}
 
 
 class _Store:
