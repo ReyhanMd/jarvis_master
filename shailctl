@@ -246,21 +246,122 @@ cmd_clean() {
   ok "clean complete"
 }
 
+# ─── api: fast backend-only restart (Ollama/Redis/native untouched) ──────────
+# Use this during development — it's 3-4 seconds vs 30+ for a full restart.
+# Also force-kills any frozen uvicorn before starting fresh, which a plain
+# restart misses when the event loop is blocked.
+cmd_api_restart() {
+  log "restarting shail_api only"
+
+  # Force-kill any uvicorn holding port 8000 (PID file + port fallback)
+  local pid_file="$PID_DIR/shail_api.pid"
+  if [ -f "$pid_file" ]; then
+    local tpid
+    tpid="$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')"
+    if is_alive "$tpid"; then
+      kill "$tpid" 2>/dev/null || true
+      sleep 1
+      is_alive "$tpid" && kill -9 "$tpid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+  fi
+  local opid
+  opid="$(port_pid 8000)"
+  if [ -n "$opid" ]; then
+    log "force-killing orphan on :8000 (pid $opid)"
+    kill -9 "$opid" 2>/dev/null || true
+    sleep 1
+  fi
+
+  # Verify port is clear
+  opid="$(port_pid 8000)"
+  if [ -n "$opid" ]; then
+    err "port 8000 still occupied by PID $opid — abort"
+    return 1
+  fi
+
+  # Start fresh
+  local venv="$ROOT/services_env"
+  local py="$venv/bin/python3"
+  [ -x "$py" ] || py="$venv/bin/python3.9"
+  PYTHONPATH="$ROOT" "$py" -m uvicorn apps.shail.main:app \
+    --host 127.0.0.1 --port 8000 \
+    >"$LOG_DIR/shail_api.log" 2>&1 &
+  local new_pid=$!
+  echo "$new_pid" >"$pid_file"
+  log "shail_api starting (pid $new_pid) — waiting for :8000"
+
+  local waited=0
+  until port_pid 8000 >/dev/null 2>&1 || [ "$waited" -ge 20 ]; do
+    sleep 1; waited=$((waited + 1)); printf "."
+  done
+  echo
+
+  if port_pid 8000 >/dev/null 2>&1; then
+    ok "shail_api up on :8000"
+    # Quick health check
+    sleep 1
+    python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)
+    d = json.loads(r.read())
+    print(f'  status={d[\"status\"]}  ollama={d[\"ollama_reachable\"]}  chroma={d[\"chroma_ready\"]}')
+except Exception as e:
+    print(f'  health not yet ready: {e}')
+" 2>/dev/null || true
+  else
+    err "shail_api failed to bind — check logs/shail_api.log"
+    tail -20 "$LOG_DIR/shail_api.log" 2>/dev/null
+    return 1
+  fi
+}
+
+cmd_health() {
+  echo "=== Service ports ==="
+  for port in 8000 11434 6379; do
+    local pid
+    pid="$(port_pid "$port")"
+    if [ -n "$pid" ]; then
+      printf "  :%s  %s(pid %s)%s\n" "$port" "$C_OK" "$pid" "$C_RST"
+    else
+      printf "  :%s  %s(not listening)%s\n" "$port" "$C_ERR" "$C_RST"
+    fi
+  done
+  echo
+  echo "=== Backend health ==="
+  python3 -c "
+import urllib.request, json, sys
+try:
+    r = urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)
+    d = json.loads(r.read())
+    for k, v in d.items():
+        print(f'  {k}: {v}')
+except Exception as e:
+    print(f'  ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>&1
+}
+
 case "${1:-}" in
-  start)        cmd_start ;;
-  stop)         cmd_stop ;;
-  restart)      cmd_restart ;;
-  status|st)    cmd_status ;;
-  logs)         cmd_logs "${2:-}" ;;
-  clean)        cmd_clean ;;
+  start)           cmd_start ;;
+  stop)            cmd_stop ;;
+  restart)         cmd_restart ;;
+  api|api-restart) cmd_api_restart ;;
+  health|h)        cmd_health ;;
+  status|st)       cmd_status ;;
+  logs)            cmd_logs "${2:-}" ;;
+  clean)           cmd_clean ;;
   ""|-h|--help|help)
     cat <<EOF
 Usage: ./shailctl <command>
 
 Commands:
-  start              Start the full SHAIL stack
+  start              Start the full SHAIL stack (Ollama → Redis → API → workers)
   stop               Stop everything (tracked + orphaned)
-  restart            Stop then start
+  restart            Stop then start (full stack, ~30s)
+  api                Fast backend-only restart (~4s). Use during development.
+  health             Print live health status of all services
   status             Show running services and ports
   logs <service>     Tail logs/<service>.log
   clean              Stop and delete stale PID files
@@ -270,8 +371,10 @@ Services in dependency order:
   rag_retriever → planner → shail_api → task_worker
 
 Examples:
-  ./shailctl status
-  ./shailctl restart
+  ./shailctl api          # restart only the FastAPI backend (fastest)
+  ./shailctl health       # check everything is alive
+  ./shailctl status       # full service table
+  ./shailctl restart      # full stack restart
   ./shailctl logs shail_api
 EOF
     ;;

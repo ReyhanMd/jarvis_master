@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from apps.shail.auth_store import _conn
+from apps.shail.crypto import encrypt as _enc, decrypt as _dec
 
 VALID_PROVIDERS = ("drive", "notion", "github", "gmail")
 
@@ -38,6 +39,10 @@ def save_connection(
         raise ValueError(f"unknown provider: {provider}")
     now = _now()
     meta_json = json.dumps(metadata or {})
+    # Encrypt-at-rest. encrypt() is idempotent + None-safe + plaintext-safe,
+    # so re-saving an already-encrypted token doesn't re-wrap or break it.
+    enc_access  = _enc(access_token)
+    enc_refresh = _enc(refresh_token)
     with _conn() as con:
         con.execute(
             """INSERT INTO mcp_connections
@@ -51,7 +56,7 @@ def save_connection(
                    scope = excluded.scope,
                    metadata = excluded.metadata,
                    connected_at = excluded.connected_at""",
-            (user_id, provider, access_token, refresh_token, expires_at, scope, meta_json, now),
+            (user_id, provider, enc_access, enc_refresh, expires_at, scope, meta_json, now),
         )
     return get_connection(user_id, provider) or {}
 
@@ -113,11 +118,14 @@ def _row_to_conn(row: sqlite3.Row) -> dict:
             md = json.loads(row["metadata"])
         except json.JSONDecodeError:
             md = {}
+    # Decrypt-on-read. decrypt() handles plaintext rows (pre-encryption
+    # legacy) transparently and returns "" on key-loss so callers can detect
+    # broken tokens and prompt the user to reconnect.
     return {
         "user_id": row["user_id"],
         "provider": row["provider"],
-        "access_token": row["access_token"],
-        "refresh_token": row["refresh_token"],
+        "access_token": _dec(row["access_token"]),
+        "refresh_token": _dec(row["refresh_token"]),
         "expires_at": row["expires_at"],
         "scope": row["scope"],
         "metadata": md,
@@ -126,7 +134,19 @@ def _row_to_conn(row: sqlite3.Row) -> dict:
         "indexed_count": int(row["indexed_count"] or 0),
         "index_status": row["index_status"] or "idle",
         "index_error": row["index_error"],
+        # Incremental sync: opaque per-provider cursor (ISO timestamp or page token)
+        "sync_cursor": row["sync_cursor"] if "sync_cursor" in row.keys() else None,
     }
+
+
+def update_sync_cursor(user_id: str, provider: str, cursor: Optional[str]) -> None:
+    """Persist an opaque sync cursor so the next incremental index starts
+    where the last one left off. `cursor=None` resets to full re-index."""
+    with _conn() as con:
+        con.execute(
+            "UPDATE mcp_connections SET sync_cursor = ? WHERE user_id = ? AND provider = ?",
+            (cursor, user_id, provider),
+        )
 
 
 # ── Per-provider settings ──────────────────────────────────────────────────

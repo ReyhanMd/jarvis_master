@@ -22,6 +22,7 @@ export const SOURCE_META: Record<SourceApp, { label: string; color: string; bg: 
   claude:     { label: 'Claude',     color: '#cc785c', bg: 'rgba(204,120,92,0.12)' },
   gemini:     { label: 'Gemini',     color: '#4285f4', bg: 'rgba(66,133,244,0.12)' },
   perplexity: { label: 'Perplexity', color: '#20b2aa', bg: 'rgba(32,178,170,0.12)' },
+  grok:       { label: 'Grok',       color: '#e5e5e5', bg: 'rgba(229,229,229,0.10)' },
   web:        { label: 'Web',        color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
 };
 

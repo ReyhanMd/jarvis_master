@@ -129,9 +129,22 @@ export default defineContentScript({
     };
     window.addEventListener('shail-auth-updated', onLocalUpdate as EventListener);
 
+    const onSocketInvalidation = async (e: CustomEvent) => {
+      try {
+        await browser.runtime.sendMessage({
+          type: 'CACHE_EVICTION',
+          payload: e.detail
+        });
+      } catch (err) {
+        // swallow
+      }
+    };
+    window.addEventListener('shail-socket-invalidation', onSocketInvalidation as unknown as EventListener);
+
     ctx.onInvalidated(() => {
       window.removeEventListener('storage', onStorageEvt);
       window.removeEventListener('shail-auth-updated', onLocalUpdate as EventListener);
+      window.removeEventListener('shail-socket-invalidation', onSocketInvalidation as unknown as EventListener);
       // browser.storage.onChanged.addListener returns void in WXT/Mozilla
       // typings; we rely on the listener being detached when the content
       // script is invalidated.

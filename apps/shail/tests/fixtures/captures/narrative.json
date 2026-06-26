@@ -1,0 +1,7 @@
+{
+  "id": "fixture-narrative-001",
+  "kind": "ai_conversation",
+  "title": "Roadmap discussion",
+  "content": "User: We need to decide between shipping the analytics dashboard or the import pipeline next quarter.\nAssistant: Both are valuable. The dashboard would give existing users immediate visibility into their data, while the import pipeline unblocks the enterprise tier we are pursuing. Given the sales motion, I would prioritize the import pipeline, but only if engineering capacity is confirmed for Q2.\nUser: Agreed. Let us plan to ship import in Q2 and revisit the dashboard at midyear review.",
+  "captured_ts": "2024-02-15T11:00:00Z"
+}

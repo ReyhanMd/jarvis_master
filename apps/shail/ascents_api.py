@@ -594,6 +594,93 @@ async def delete_ascent(
         if not existing:
             raise HTTPException(status_code=404, detail="Ascent not found")
         # ON DELETE CASCADE handles deliverables/todos/memory_links
-        con.execute("DELETE FROM ascents WHERE id = ?", (ascent_id,))
+        con.execute("DELETE FROM ascents WHERE id = ? AND user_id = ?", (ascent_id, user_id))
     write_event("PRUNE", f"ascent deleted: {ascent_id[:8]}", user_id=user_id, ref_id=ascent_id)
     return {"ok": True, "id": ascent_id}
+
+
+# ── Suggested memories endpoint ─────────────────────────────────────────────
+
+class SuggestedMemory(BaseModel):
+    id: str
+    customId: str
+    title: str
+    summary: str
+    sourceApp: str
+    timestamp: str
+    eventType: str
+    relevance_score: float
+    deliverable_hint: str   # which deliverable triggered this suggestion
+
+
+class AscendSuggestionsResponse(BaseModel):
+    suggestions: list[SuggestedMemory]
+    ascent_id: str
+    ascent_name: str
+
+
+@ascents_router.get("/{ascent_id}/suggestions", response_model=AscendSuggestionsResponse)
+async def get_ascent_suggestions(
+    ascent_id: str,
+    limit: int = 8,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> AscendSuggestionsResponse:
+    """
+    Return the top semantically-relevant memories for a given ascent.
+
+    Strategy:
+    1. Load all deliverable texts for this ascent as query terms.
+    2. Run a RAG search per deliverable (k=4) in the user's namespace.
+    3. Merge, deduplicate by customId, sort by highest relevance score.
+    4. Return top `limit` suggestions, each tagged with which deliverable
+       triggered it (used as a hint in the UI).
+    """
+    user_id = _require_user(credentials)
+    detail = _load_ascent_detail(user_id, ascent_id)
+    namespace = f"user_{user_id}"
+
+    seen_ids: set[str] = set()
+    candidates: list[dict] = []
+
+    for deliverable in detail.deliverables:
+        query = deliverable.text
+        if deliverable.description:
+            query = f"{query}. {deliverable.description}"
+        try:
+            hits = rag_search(query, k=4, namespace=namespace)
+        except Exception as exc:
+            logger.warning("RAG search failed for deliverable %s: %s", deliverable.id[:8], exc)
+            hits = []
+
+        for content, score, meta in hits:
+            cid = meta.get("customId") or meta.get("id") or ""
+            if not cid or cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            title = meta.get("title", "")
+            if not title:
+                # derive title from first line of content
+                title = (content or "").split("\n")[0][:60] or "Untitled"
+            summary = meta.get("summary") or (content or "")[:200]
+            candidates.append({
+                "id": cid,
+                "customId": cid,
+                "title": title,
+                "summary": summary,
+                "sourceApp": meta.get("sourceApp", "web"),
+                "timestamp": meta.get("timestamp", ""),
+                "eventType": meta.get("eventType", "page_visit"),
+                "relevance_score": round(1.0 - float(score), 4),  # invert cosine distance
+                "deliverable_hint": deliverable.text[:60],
+            })
+
+    # Sort by relevance descending
+    candidates.sort(key=lambda x: x["relevance_score"], reverse=True)
+    top = candidates[:limit]
+
+    return AscendSuggestionsResponse(
+        suggestions=[SuggestedMemory(**c) for c in top],
+        ascent_id=ascent_id,
+        ascent_name=detail.name,
+    )
+

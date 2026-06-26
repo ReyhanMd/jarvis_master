@@ -117,7 +117,7 @@ def _ensure_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
 async def _ollama_call(
     model: str, messages: List[dict], system: str, *, stream: bool
-) -> str | AsyncIterator[str]:
+) -> str | AsyncIterator[dict]:
     s = get_settings()
     payload = {
         "model": model or s.ollama_chat_model,
@@ -136,7 +136,7 @@ async def _ollama_call(
             resp.raise_for_status()
             return resp.json()["message"]["content"]
 
-    async def gen() -> AsyncIterator[str]:
+    async def gen() -> AsyncIterator[dict]:
         async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
             async with client.stream(
                 "POST", f"{s.ollama_base_url}/api/chat", json=payload
@@ -150,10 +150,9 @@ async def _ollama_call(
                     except json.JSONDecodeError:
                         continue
                     chunk = (data.get("message") or {}).get("content") or ""
-                    if chunk:
-                        yield chunk
-                    if data.get("done"):
-                        return
+                    done = bool(data.get("done"))
+                    if chunk or done:
+                        yield {"text": chunk, "done": done}
     return gen()
 
 
@@ -161,7 +160,7 @@ async def _ollama_call(
 
 async def _openai_call(
     model: str, messages: List[dict], system: str, api_key: str, *, stream: bool
-) -> str | AsyncIterator[str]:
+) -> str | AsyncIterator[dict]:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -179,7 +178,7 @@ async def _openai_call(
             data = resp.json()
             return data["choices"][0]["message"]["content"]
 
-    async def gen() -> AsyncIterator[str]:
+    async def gen() -> AsyncIterator[dict]:
         async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
             async with client.stream(
                 "POST", OPENAI_API, json=payload, headers=headers
@@ -190,6 +189,7 @@ async def _openai_call(
                         continue
                     payload_str = line[5:].strip()
                     if payload_str == "[DONE]":
+                        yield {"text": "", "done": True}
                         return
                     try:
                         evt = json.loads(payload_str)
@@ -197,8 +197,10 @@ async def _openai_call(
                         continue
                     delta = (evt.get("choices") or [{}])[0].get("delta") or {}
                     chunk = delta.get("content") or ""
-                    if chunk:
-                        yield chunk
+                    finish_reason = (evt.get("choices") or [{}])[0].get("finish_reason")
+                    done = finish_reason is not None
+                    if chunk or done:
+                        yield {"text": chunk, "done": done}
     return gen()
 
 
@@ -206,7 +208,7 @@ async def _openai_call(
 
 async def _anthropic_call(
     model: str, messages: List[dict], system: str, api_key: str, *, stream: bool
-) -> str | AsyncIterator[str]:
+) -> str | AsyncIterator[dict]:
     """Anthropic Messages API: system prompt is a top-level field, not
     a message. SSE chunks come as `event: content_block_delta` with
     `delta.text` carrying the next token.
@@ -232,7 +234,7 @@ async def _anthropic_call(
             blocks = data.get("content") or []
             return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
-    async def gen() -> AsyncIterator[str]:
+    async def gen() -> AsyncIterator[dict]:
         async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
             async with client.stream(
                 "POST", ANTHROPIC_API, json=payload, headers=headers
@@ -250,10 +252,9 @@ async def _anthropic_call(
                         continue
                     if evt.get("type") == "content_block_delta":
                         chunk = (evt.get("delta") or {}).get("text") or ""
-                        if chunk:
-                            yield chunk
+                        yield {"text": chunk, "done": False}
                     elif evt.get("type") == "message_stop":
-                        return
+                        yield {"text": "", "done": True}
     return gen()
 
 
@@ -300,10 +301,10 @@ async def stream_llm(
     user_id: Optional[str] = None,
     context: str = "",
     system_prompt: str = "",
-) -> AsyncIterator[Tuple[str, dict]]:
-    """Streaming call. Yields (chunk, meta) tuples. The first yielded meta
+) -> AsyncIterator[Tuple[dict, dict]]:
+    """Streaming call. Yields (payload_dict, meta) tuples. The first yielded meta
     indicates which provider is actually answering (post-fallback). The
-    caller can ignore it or surface it in the UI ("answering via X").
+    payload_dict is standardized to: {"text": "...", "done": bool}.
     """
     cfg = get_user_llm_config(user_id)
     sys_content = _build_system_content(system_prompt, context)
@@ -311,22 +312,32 @@ async def stream_llm(
 
     try:
         gen = await _dispatch(cfg, msgs, sys_content, stream=True)
-        async for chunk in gen:
-            yield chunk, cfg
+        has_done = False
+        async for payload in gen:
+            if payload.get("done"):
+                has_done = True
+            yield payload, cfg
+        if not has_done:
+            yield {"text": "", "done": True}, cfg
         return
     except Exception as e:
         if cfg["provider"] == PROVIDER_OLLAMA:
-            yield f"\n[Local model error: {e}]", {**cfg, "error": str(e)}
+            yield {"text": f"\n[Local model error: {e}]", "done": True}, {**cfg, "error": str(e)}
             return
         logger.warning("LLM stream %s failed (%s) — falling back to Ollama", cfg["provider"], e)
         fb_cfg = {"provider": PROVIDER_OLLAMA, "model": DEFAULT_MODELS[PROVIDER_OLLAMA],
                   "api_key": "", "fellback": True, "reason": f"{cfg['provider']} error: {e}"}
         try:
             gen = await _dispatch(fb_cfg, msgs, sys_content, stream=True)
-            async for chunk in gen:
-                yield chunk, fb_cfg
+            has_done = False
+            async for payload in gen:
+                if payload.get("done"):
+                    has_done = True
+                yield payload, fb_cfg
+            if not has_done:
+                yield {"text": "", "done": True}, fb_cfg
         except Exception as e2:
-            yield (f"\n[Both providers failed: {e2}]", {**fb_cfg, "error": str(e2)})
+            yield {"text": f"\n[Both providers failed: {e2}]", "done": True}, {**fb_cfg, "error": str(e2)}
 
 
 async def _dispatch(cfg: dict, msgs: list, system: str, *, stream: bool):
