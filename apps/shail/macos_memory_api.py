@@ -19,15 +19,16 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from apps.shail.settings import get_settings
-from apps.shail.auth_api import get_user_or_local
+from apps.shail.auth_api import get_current_user
 from shail.memory.rag import (
     COLLECTION_EPHEMERAL,
     COLLECTION_IMPORTANT,
@@ -38,9 +39,17 @@ from shail.memory.rag import (
 )
 from shail.memory.path_index import (
     get_by_id as path_get_by_id,
+    get_by_path as path_get_by_path,
     scan as path_scan,
     search as path_search,
     stats as path_stats,
+    tree as path_tree,
+    mark_embedded as path_mark_embedded,
+    upsert_file as path_upsert_file,
+    add_root as path_add_root,
+    remove_root as path_remove_root,
+    list_roots as path_list_roots,
+    _default_roots,
 )
 from shail.memory.embeddings import embed_texts, embed_query
 
@@ -128,7 +137,8 @@ def _now_iso() -> str:
 
 
 def _user_namespace(user_id: str) -> str:
-    return f"user_{user_id}" if user_id and user_id != "local" else "local"
+    # Always scope to the authenticated user — no anonymous fallback
+    return f"user_{user_id}"
 
 
 def _cleanup_ephemeral() -> int:
@@ -199,7 +209,7 @@ def _ingest_unified(content: str, metadata: Dict[str, Any]) -> str:
     store = _get_store()
     import uuid as _uuid
     record_id = metadata.pop("id", str(_uuid.uuid4()))
-    namespace = metadata.get("namespace", "local")
+    namespace = metadata.get("namespace") or _namespace(user_id)
     try:
         embeddings = embed_texts([content])
         embedding = embeddings[0] if embeddings else []
@@ -224,7 +234,7 @@ def _ingest_unified(content: str, metadata: Dict[str, Any]) -> str:
 async def capture_ephemeral(
     req: EphemeralCaptureRequest,
     background_tasks: BackgroundTasks,
-    user_id: str = Depends(get_user_or_local),
+    user_id: str = Depends(get_current_user),
 ) -> EphemeralCaptureResponse:
     """Write a perishable memory from macOS native services (screen capture / accessibility)."""
     if len(req.content.strip()) < 30:
@@ -252,7 +262,7 @@ async def capture_ephemeral(
 @memory_router.post("/important", response_model=ImportantCaptureResponse, status_code=201)
 async def capture_important(
     req: ImportantCaptureRequest,
-    user_id: str = Depends(get_user_or_local),
+    user_id: str = Depends(get_current_user),
 ) -> ImportantCaptureResponse:
     """Write or promote a memory to the persistent Important tier."""
     if len(req.content.strip()) < 30:
@@ -282,7 +292,7 @@ async def unified_search(
     q: str = "",
     k: int = 20,
     tiers: str = "important,ephemeral,path_index",
-    user_id: str = Depends(get_user_or_local),
+    user_id: str = Depends(get_current_user),
 ) -> UnifiedSearchResponse:
     """
     Search across all memory tiers in the user's namespace.
@@ -415,15 +425,188 @@ async def path_index_stats() -> Dict[str, Any]:
     return path_stats(settings.path_index_db)
 
 
+@path_idx_router.get("/tree")
+async def get_path_tree(
+    root: Optional[str] = None,
+    depth: int = Query(default=2, le=10),
+    max_nodes: int = Query(default=500, le=5000),
+) -> Dict[str, Any]:
+    """Hierarchical folder/file map for Graphify.tsx + map-driven retrieval.
+
+    - `root` omitted → returns the top-level content roots auto-discovered at
+      startup (typically Documents / Desktop / Downloads / ~/Code).
+    - `depth` controls how many BFS levels under each root are expanded.
+    - Hard cap at `max_nodes` (default 500) to prevent OOM on giant subtrees.
+    """
+    settings = get_settings()
+    return path_tree(settings.path_index_db, root, depth=int(depth), max_nodes=int(max_nodes))
+
+
+@path_idx_router.post("/embed")
+async def embed_path_lazy(path: str) -> Dict[str, Any]:
+    """Refresh a single file in the path index.
+
+    Kept at /embed for backward compatibility with older Graphify builds. It no
+    longer writes local file content into the SHAIL vector memory store.
+    """
+    settings = get_settings()
+    record = path_get_by_path(settings.path_index_db, path)
+    if not record:
+        raise HTTPException(status_code=404, detail="path not in index")
+    if record.get("is_dir"):
+        raise HTTPException(status_code=400, detail="refresh targets files only")
+    refreshed = bool(path_upsert_file(settings.path_index_db, path))
+    return {"path": path, "chunks_ingested": 0, "embedded": False, "refreshed": refreshed, "user_id": "local"}
+
+
+@path_idx_router.post("/open")
+async def open_path(
+    path: str,
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Reveal a path-indexed local file in Finder/file manager."""
+    settings = get_settings()
+    record = path_get_by_path(settings.path_index_db, path)
+    if not record:
+        raise HTTPException(status_code=404, detail="path not in index")
+
+    # Security: Verify the path is within the allowed active scan roots
+    from pathlib import Path as _Path
+    from shail.memory.path_index import _default_roots, list_roots as path_list_roots
+    
+    persisted = path_list_roots(settings.path_index_db)
+    env_roots = [r for r in settings.scan_roots if r.strip()]
+    defaults = _default_roots()
+    active_roots = [
+        _Path(r).resolve() 
+        for r in list(dict.fromkeys(env_roots + [r["path"] for r in persisted] + defaults))
+    ]
+    
+    try:
+        resolved_file = _Path(path).resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+        
+    is_safe = any(resolved_file.is_relative_to(root) for root in active_roots)
+    if not is_safe:
+        raise HTTPException(status_code=403, detail="Access denied: File is outside indexed directories")
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="file no longer exists")
+    try:
+        if os.uname().sysname == "Darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path) or "."])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not open file: {exc}")
+    return {"ok": True, "path": path}
+
+
+class RootRequest(BaseModel):
+    path: str
+
+
+@path_idx_router.get("/roots")
+async def list_scan_roots() -> Dict[str, Any]:
+    """List all scan roots: env-configured, persisted, and auto-discovered defaults."""
+    settings = get_settings()
+    persisted = path_list_roots(settings.path_index_db)
+    persisted_paths = {r["path"] for r in persisted}
+    env_roots = [r for r in settings.scan_roots if r.strip()]
+    defaults = _default_roots()
+    return {
+        "env_roots": env_roots,
+        "persisted_roots": persisted,
+        "default_roots": defaults,
+        "active_roots": list(dict.fromkeys(env_roots + [r["path"] for r in persisted] + defaults)),
+    }
+
+
+@path_idx_router.post("/roots")
+async def add_scan_root(
+    req: RootRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """Add a new custom scan root. Persists across restarts. Triggers a background scan."""
+    settings = get_settings()
+    added = path_add_root(settings.path_index_db, req.path)
+    if not added:
+        # Either already exists or path isn't a directory.
+        import os as _os
+        if not _os.path.isdir(req.path):
+            raise HTTPException(status_code=400, detail=f"Not a directory: {req.path}")
+        return {"ok": True, "added": False, "message": "root already exists"}
+
+    def _scan_new_root():
+        try:
+            count = path_scan(settings.path_index_db, roots=[req.path])
+            logger.info("Scanned new root %s: %d files", req.path, count)
+        except Exception as e:
+            logger.error("Scan of new root %s failed: %s", req.path, e)
+
+    background_tasks.add_task(_scan_new_root)
+    return {"ok": True, "added": True, "path": req.path, "message": "root added and scan queued"}
+
+
+@path_idx_router.delete("/roots")
+async def remove_scan_root(req: RootRequest) -> Dict[str, Any]:
+    """Remove a persisted scan root (does NOT delete already-indexed files)."""
+    settings = get_settings()
+    removed = path_remove_root(settings.path_index_db, req.path)
+    return {"ok": True, "removed": removed, "path": req.path}
+
+
+@path_idx_router.get("/diagnostics")
+async def path_index_diagnostics() -> Dict[str, Any]:
+    """Local-file retrieval health.
+
+    Surfaces:
+      - extractor_deps  — which optional libraries (pypdf/docx/openpyxl/pptx)
+                          are installed; missing entries explain why content
+                          search misses PDF/Word/Excel content
+      - extractor_failures — per-extension failure counts seen this process
+      - retrieval_stats — per-stage counters from local-file retrieval
+      - recent_traces   — last N query traces (which hits dropped and why)
+    """
+    from apps.shail.retrieval.diagnostics import health_summary
+    return health_summary()
+
+
 @path_idx_router.get("/{record_id}/content", response_model=PathContentResponse)
-async def get_path_content(record_id: str) -> PathContentResponse:
+async def get_path_content(
+    record_id: str,
+    user_id: str = Depends(get_current_user),
+) -> PathContentResponse:
     """Read the actual file content for a path index pointer."""
     settings = get_settings()
     record = path_get_by_id(settings.path_index_db, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Path index record not found")
 
-    file_path = record["path"]
+    file_path = os.path.abspath(record["path"])
+    
+    # Security: Verify the path is within the allowed active scan roots
+    from pathlib import Path as _Path
+    from shail.memory.path_index import _default_roots, list_roots as path_list_roots
+    
+    persisted = path_list_roots(settings.path_index_db)
+    env_roots = [r for r in settings.scan_roots if r.strip()]
+    defaults = _default_roots()
+    active_roots = [
+        _Path(r).resolve() 
+        for r in list(dict.fromkeys(env_roots + [r["path"] for r in persisted] + defaults))
+    ]
+    
+    try:
+        resolved_file = _Path(file_path).resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+        
+    is_safe = any(resolved_file.is_relative_to(root) for root in active_roots)
+    if not is_safe:
+        raise HTTPException(status_code=403, detail="Access denied: File is outside indexed directories")
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"File no longer exists: {file_path}")
 

@@ -8,7 +8,7 @@
  * Closes:    Escape key  OR  clicking the backdrop
  */
 
-import { api, cleanContentForDisplay, formatFullInject } from '../src/lib/api';
+import { api, getApiKey, cleanContentForDisplay, formatFullInject } from '../src/lib/api';
 import { timeAgo } from '../src/lib/utils';
 import type { MemoryRecord, EventType, SourceApp } from '../src/types/contracts';
 
@@ -19,6 +19,7 @@ const APP_META: Record<SourceApp, { label: string; color: string }> = {
   claude:     { label: 'Claude',     color: '#cc785c' },
   gemini:     { label: 'Gemini',     color: '#4285f4' },
   perplexity: { label: 'Perplexity', color: '#20b2aa' },
+  grok:       { label: 'Grok',       color: '#e5e5e5' },
   web:        { label: 'Web',        color: '#6b7280' },
 };
 
@@ -597,9 +598,11 @@ function buildOverlay(getLastFocused: () => Element | null) {
   async function doQuery(text: string) {
     renderSkeletons();
     try {
+      const apiKey = await getApiKey();
+      const authHeader: Record<string, string> = apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
       const resp = await fetch('http://localhost:8000/query', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ text, history: [] }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

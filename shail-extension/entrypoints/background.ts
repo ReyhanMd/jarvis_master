@@ -2,6 +2,7 @@ import { api } from '../src/lib/api';
 import type {
   BackgroundMessage,
   BackgroundResponse,
+  CaptureResult,
   SitePolicy,
 } from '../src/types/contracts';
 
@@ -55,6 +56,26 @@ async function storeDocumentId(docId: string, payload: import('../src/types/cont
   });
 }
 
+function captureOutcome(
+  status: CaptureResult['status'],
+  reason?: string,
+  memoryId?: string,
+  summary?: string,
+): BackgroundResponse {
+  if (status === 'error') {
+    return { ok: false, error: reason || 'Capture failed' };
+  }
+  return {
+    ok: true,
+    data: {
+      status,
+      ...(memoryId ? { memoryId } : {}),
+      ...(summary ? { summary } : {}),
+      ...(reason ? { reason } : {}),
+    },
+  };
+}
+
 // ─── Badge helpers ────────────────────────────────────────────────────────────
 
 let badgeClearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -89,6 +110,51 @@ async function getCachedPolicies(): Promise<SitePolicy[]> {
   return (result[KEY_POLICIES] as SitePolicy[]) ?? [];
 }
 
+async function updateCaptureStateCache(
+  memoryId: string,
+  payload: import('../src/types/contracts').CaptureCandidate,
+): Promise<void> {
+  if (payload.eventType !== 'ai_conversation') return;
+
+  await browser.storage.local.set({
+    shail_active_capture: {
+      state: 'LISTENING',
+      platform: payload.sourceApp,
+      title: payload.title ?? '',
+      turnCount: payload.turnCount ?? 0,
+      progressValue: 0,
+      conversationId: payload.conversationId,
+      memoryId,
+      sourceUrl: payload.sourceUrl,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+
+  try {
+    const surface = await api.captureState({ memoryId });
+    const stored = await browser.storage.local.get('shail_capture_state_cache');
+    const cache = (stored['shail_capture_state_cache'] as Record<string, unknown>) ?? {};
+    cache[memoryId] = surface;
+    await browser.storage.local.set({
+      shail_capture_state_cache: cache,
+      shail_active_capture: {
+        state: 'LISTENING',
+        platform: payload.sourceApp,
+        title: surface.title || payload.title || '',
+        turnCount: payload.turnCount ?? 0,
+        progressValue: 0,
+        conversationId: surface.conversation_id || payload.conversationId,
+        memoryId,
+        sourceUrl: surface.source_url || payload.sourceUrl,
+        backendState: surface,
+        updatedAt: surface.updated_at,
+      },
+    });
+  } catch {
+    // Backend state may not be queryable immediately after queued ingest.
+  }
+}
+
 // ─── Policy check ─────────────────────────────────────────────────────────────
 
 function isDomainDenied(url: string, policies: SitePolicy[]): boolean {
@@ -111,6 +177,7 @@ async function handleMessage(
 ): Promise<BackgroundResponse> {
   switch (message.type) {
     case 'CAPTURE': {
+      const isManualSave = message.payload.captureInitiator === 'manual';
       // ── Dedup: check local index before hitting the API ────────────────────
       // Two signals:
       //   1. customId match   — exact same capture (url + date + content hash)
@@ -126,7 +193,7 @@ async function handleMessage(
         const hasConversationId = !!(message.payload as { conversationId?: string }).conversationId;
 
         const isDuplicate =
-          !hasConversationId && (
+          !isManualSave && !hasConversationId && (
             // Exact fingerprint match (covers all event types)
             (customId && dupIndex.some(e => e.customId === customId)) ||
             // URL match for page visits (same page across different days)
@@ -135,7 +202,7 @@ async function handleMessage(
           );
 
         if (isDuplicate) {
-          return { ok: true, data: { status: 'duplicate' } };
+          return captureOutcome('duplicate', 'Already saved locally');
         }
       }
 
@@ -145,30 +212,39 @@ async function handleMessage(
       const contentLength = (
         message.payload.assistantText ?? message.payload.pageContent ?? ''
       ).trim().length;
-      if (contentLength < 80) {
-        return { ok: true, data: { status: 'denied' } };
+      if (contentLength < (isManualSave ? 10 : 80)) {
+        return captureOutcome('denied', 'Not enough readable content to save');
       }
 
       const policies = await getCachedPolicies();
       if (isDomainDenied(message.payload.sourceUrl, policies)) {
-        return { ok: true, data: { status: 'denied' } };
+        return captureOutcome('denied', 'This site is blocked by capture policy');
       }
 
       const captureEnabled = await getCaptureEnabled();
-      if (!captureEnabled) {
-        return { ok: true, data: { status: 'denied' } };
+      if (!captureEnabled && !isManualSave) {
+        return captureOutcome('denied', 'Active capture is paused');
       }
 
       try {
         const result = await api.capture(message.payload);
-        if (result.status === 'created') {
+        if (result.memoryId && result.status !== 'denied' && result.status !== 'duplicate' && result.status !== 'error') {
           showCaptureBadge();
           // ── Store document ID locally so the popup/sidepanel browse is instant
           await storeDocumentId(result.memoryId, message.payload);
+          await updateCaptureStateCache(result.memoryId, message.payload);
         }
         // Clear any previous error on success
         await browser.storage.local.remove('shail_last_capture_error');
-        return { ok: true, data: result };
+        if (!result.memoryId && result.status !== 'duplicate') {
+          return captureOutcome(result.status, result.reason ?? 'Capture did not create a backend memory');
+        }
+        return captureOutcome(
+          result.status === 'created' ? 'saved' : result.status,
+          result.reason,
+          result.memoryId,
+          result.summary,
+        );
       } catch (err) {
         showErrorBadge();
         const rawMsg    = (err as Error).message ?? '';
@@ -198,7 +274,7 @@ async function handleMessage(
         if (isOffline) {
           // Treat queued captures as a soft success so the popup does not
           // flash a red error — they will drain when the backend comes back.
-          return { ok: true, data: { status: 'denied' } };
+          return captureOutcome('offline_queued', friendlyMsg);
         }
         return { ok: false, error: friendlyMsg };
       }
@@ -255,10 +331,163 @@ async function handleMessage(
       }
     }
 
+    case 'START_BULK_CYCLE': {
+      startBulkCycle(message.payload.urls);
+      return { ok: true, data: null };
+    }
+
+    case 'CACHE_EVICTION': {
+      try {
+        const payload = message.payload as { keys?: string[]; action?: string; id?: string };
+        const action = payload.action;
+        const id = payload.id;
+
+        const stored = await browser.storage.local.get([KEY_DOC_INDEX, 'shail_recent_saves']);
+        let index = (stored[KEY_DOC_INDEX] as DocIndexEntry[]) ?? [];
+        let recentSaves = (stored['shail_recent_saves'] as Array<{ url: string; timestamp: string }>) ?? [];
+
+        if (action === 'clear') {
+          index = [];
+          recentSaves = [];
+        } else if (action === 'delete' && id) {
+          const entry = index.find(e => e.id === id || e.customId === id);
+          if (entry) {
+            recentSaves = recentSaves.filter(s => s.url !== entry.sourceUrl);
+          }
+          index = index.filter(e => e.id !== id && e.customId !== id);
+        }
+
+        await browser.storage.local.set({
+          [KEY_DOC_INDEX]: index,
+          shail_recent_saves: recentSaves
+        });
+      } catch (err) {
+        console.warn('[SHAIL] Cache eviction sync failed:', err);
+      }
+      return { ok: true, data: null };
+    }
+
+    case 'DELETE_TRANSCRIPT_KEEP_BLUEPRINT': {
+      try {
+        const { memoryId, policy } = message.payload;
+        await api.setRetention(memoryId, policy);
+        try {
+          const surface = await api.captureState({ memoryId });
+          const stored = await browser.storage.local.get('shail_capture_state_cache');
+          const cache = (stored['shail_capture_state_cache'] as Record<string, unknown>) ?? {};
+          cache[memoryId] = surface;
+          await browser.storage.local.set({ shail_capture_state_cache: cache });
+        } catch {
+          // Non-critical; UI will refresh from backend on next open/focus.
+        }
+        return { ok: true, data: null };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
     default:
       return { ok: false, error: 'Unknown message type' };
   }
 }
+
+// ─── Background Bulk Cycler ───────────────────────────────────────────────────
+
+async function waitTabComplete(tabId: number, timeoutMs = 12000): Promise<boolean> {
+  return new Promise((resolve) => {
+    let timer: any = null;
+
+    const listener = (id: number, info: { status?: string }) => {
+      if (id === tabId && info.status === 'complete') {
+        cleanup();
+        resolve(true);
+      }
+    };
+
+    const cleanup = () => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      if (timer) clearTimeout(timer);
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+
+    timer = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, timeoutMs);
+  });
+}
+
+let isCycling = false;
+async function startBulkCycle(urls: string[]) {
+  if (isCycling) return;
+  isCycling = true;
+
+  try {
+    await browser.storage.local.set({
+      shail_bulk_status: {
+        isCycling: true,
+        completedCount: 0,
+        totalInQueue: urls.length,
+        currentUrl: urls[0]
+      }
+    });
+
+    const tab = await browser.tabs.create({ active: false, url: urls[0] });
+    if (!tab.id) return;
+
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+
+      await browser.storage.local.set({
+        shail_bulk_status: {
+          isCycling: true,
+          completedCount: i,
+          totalInQueue: urls.length,
+          currentUrl: url
+        }
+      });
+
+      let success = false;
+      let retries = 3;
+      let delay = 1000;
+
+      while (retries > 0 && !success) {
+        try {
+          await browser.tabs.update(tab.id, { url });
+          await waitTabComplete(tab.id, 12000);
+          await new Promise(r => setTimeout(r, 4000));
+
+          await browser.tabs.sendMessage(tab.id, { type: 'TRIGGER_SCROLL_PUMP' });
+          await new Promise(r => setTimeout(r, 15000));
+          success = true;
+        } catch (e) {
+          retries--;
+          console.warn(`[SHAIL] Bulk cycle error on ${url}, retries left: ${retries}`, e);
+          if (retries > 0) {
+            await new Promise(r => setTimeout(r, delay));
+            delay *= 2;
+          }
+        }
+      }
+    }
+
+    await browser.tabs.remove(tab.id);
+  } catch (err) {
+    console.error('[SHAIL] Bulk cycle error:', err);
+  } finally {
+    isCycling = false;
+    await browser.storage.local.set({
+      shail_bulk_status: {
+        isCycling: false,
+        completedCount: urls.length,
+        totalInQueue: urls.length,
+        currentUrl: ''
+      }
+    });
+  }
+}
+
 
 // ─── Background entry ─────────────────────────────────────────────────────────
 

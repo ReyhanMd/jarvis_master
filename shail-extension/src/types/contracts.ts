@@ -10,13 +10,16 @@ export type EventType =
   | 'mindmap'
   | 'diagram'
   | 'html_page'
-  | 'document';
+  | 'document'
+  | 'github_pr_diff'
+  | 'bulk_history';
 
 export type SourceApp =
   | 'chatgpt'
   | 'claude'
   | 'gemini'
   | 'perplexity'
+  | 'grok'
   | 'web';
 
 // ─── Structured payloads (v2 envelopes) ─────────────────────────────────────
@@ -95,6 +98,10 @@ export interface CaptureCandidate {
   customId: string;
   /** Provider conversation UUID extracted from the URL (Sprint 1+) */
   conversationId?: string;
+  /** True when SHAIL generated a temporary chat ID before the provider URL had a stable ID. */
+  conversationIdTemporary?: boolean;
+  /** Temporary chat ID to merge into this capture once the provider stable ID appears. */
+  previousConversationId?: string;
   eventType: EventType;
   sourceApp: SourceApp;
   sourceUrl: string;
@@ -103,10 +110,6 @@ export interface CaptureCandidate {
   userText?: string;      // the user's prompt (ai_conversation only)
   assistantText?: string; // the AI's response (ai_conversation only)
   pageContent?: string;   // trimmed page text (page_visit only)
-  /** Canonical thread ID from the provider's URL (e.g. ChatGPT /c/<uuid>).
-   *  When present, the backend upserts to the same memory record for every
-   *  turn in the conversation instead of creating a new record per snapshot. */
-  conversationId?: string;
   artifactKind?: string;
   artifactMimeType?: string;
   artifactPayload?: Record<string, unknown>;
@@ -114,6 +117,24 @@ export interface CaptureCandidate {
   artifactCompleteness?: 'complete' | 'partial' | 'stub' | 'legacy_partial';
   captureHints?: Record<string, unknown>;
   selectorVersion?: string;
+  /** Phase 2: number of conversation turns in this capture */
+  turnCount?: number;
+  /** Phase 2: how this capture was produced */
+  captureMode?: 'active' | 'retroactive' | 'bulk';
+  /** Phase 2: whether retroactive capture came from API interception or DOM scroll fallback. */
+  captureSource?: 'api' | 'dom_scroll';
+  /** Explicit user actions bypass automatic-capture pause, but not blocked-domain policy. */
+  captureInitiator?: 'auto' | 'manual';
+  /** Typed extraction preserving code, tables, math, images, and tool output. */
+  segments?: CaptureSegment[];
+}
+
+export interface CaptureSegment {
+  kind: 'text' | 'markdown' | 'code' | 'table' | 'mermaid' | 'math' | 'html' | 'json' | 'image_ref' | 'tool_call' | 'tool_result';
+  content: string;
+  language?: string;
+  role?: 'user' | 'assistant' | 'tool';
+  metadata?: Record<string, unknown>;
 }
 
 // ─── Memory ─────────────────────────────────────────────────────────────────
@@ -220,12 +241,44 @@ export interface UserProfile {
 // ─── API responses ────────────────────────────────────────────────────────────
 
 export interface CaptureResult {
-  memoryId: string;
-  status: 'created' | 'queued' | 'duplicate' | 'denied';
+  memoryId?: string;
+  status: 'saved' | 'created' | 'queued' | 'duplicate' | 'denied' | 'offline_queued' | 'error';
   summary?: string;
+  reason?: string;
+}
+
+export interface CaptureSurfaceState {
+  memory_id?: string;
+  conversation_id?: string;
+  source_app: SourceApp;
+  source_url: string;
+  title: string;
+  capture_mode: 'active' | 'retroactive' | 'bulk';
+  capture_source?: 'api' | 'dom_scroll';
+  capture_policy: 'capturing' | 'paused' | 'excluded' | 'ended';
+  retention_policy: 'keep_raw' | 'blueprint_only' | 'decide_later' | 'transcript_deleted';
+  pipeline: {
+    current_stage?: string;
+    current_state?: string;
+    stages: Record<string, unknown>;
+  };
+  blueprint: {
+    present: boolean;
+    job_state?: 'pending' | 'running' | 'done' | 'failed';
+    last_error?: string | null;
+  };
+  raw_transcript?: {
+    content_chars?: number;
+    segment_count?: number;
+    embedded?: boolean;
+    blueprinted?: boolean;
+    transcript_deleted_at?: string | null;
+  };
+  updated_at: string;
 }
 
 export interface StatsResult {
+  totalLocalMemories: number;
   memoriesThisWeek: number;
   topSource: SourceApp | null;
   lastCaptured: MemoryRecord | null;
@@ -241,7 +294,10 @@ export type BackgroundMessage =
   | { type: 'GET_POLICIES' }
   | { type: 'FETCH_ASCENT'; payload: { id: string } }
   | { type: 'TOGGLE_TODO'; payload: { ascentId: string; todoId: string; completed: boolean } }
-  | { type: 'SYNC_PAUSE_BADGE'; payload: { enabled: boolean } };
+  | { type: 'SYNC_PAUSE_BADGE'; payload: { enabled: boolean } }
+  | { type: 'START_BULK_CYCLE'; payload: { sourceApp: SourceApp; urls: string[] } }
+  | { type: 'DELETE_TRANSCRIPT_KEEP_BLUEPRINT'; payload: { memoryId: string; policy: 'keep_raw' | 'blueprint_only' | 'decide_later' } }
+  | { type: 'CACHE_EVICTION'; payload: { keys?: string[]; action?: string; id?: string } };
 
 export type BackgroundResponse =
   | { ok: true; data: unknown }

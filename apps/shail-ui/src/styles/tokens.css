@@ -1,0 +1,44 @@
+/* SHAIL design tokens — manifesto §Visual style.
+ * Dual-mode: legacy (default) and v2 (when html[data-ui="v2"]).
+ * Legacy values match observed inline-style colors so existing components don't shift.
+ */
+
+:root {
+  /* Legacy palette — kept as fallback; v2 is the graduated default */
+  --shail-bg-base:        #0c0d10;
+  --shail-bg-surface:     #14161b;
+  --shail-bg-raised:      #1c1f25;
+  --shail-bg-overlay:     #262a32;
+  --shail-border-subtle:  #23262d;
+  --shail-border-strong:  #353a44;
+  --shail-text-primary:   #ecedf0;
+  --shail-text-secondary: #a8acb6;
+  --shail-text-muted:     #6c707a;
+  --shail-accent:         #7aa6e0;
+  --shail-accent-soft:    #1a2a40;
+  --shail-evidence:       #8a8ad4;
+  --shail-evidence-soft:  #1d1d36;
+  --shail-success:        #5fd29a;
+  --shail-warning:        #e0b65a;
+  --shail-danger:         #e07070;
+}
+
+html[data-ui="v2"] {
+  /* v2 palette — calmer, layered, deep charcoal base, indigo evidence */
+  --shail-bg-base:        #0c0d10;   /* deep charcoal, not pure black */
+  --shail-bg-surface:     #14161b;
+  --shail-bg-raised:      #1c1f25;
+  --shail-bg-overlay:     #262a32;
+  --shail-border-subtle:  #23262d;
+  --shail-border-strong:  #353a44;
+  --shail-text-primary:   #ecedf0;   /* off-white */
+  --shail-text-secondary: #a8acb6;
+  --shail-text-muted:     #6c707a;
+  --shail-accent:         #7aa6e0;   /* one strong calm action color */
+  --shail-accent-soft:    #1a2a40;
+  --shail-evidence:       #8a8ad4;   /* indigo family — proof feels different */
+  --shail-evidence-soft:  #1d1d36;
+  --shail-success:        #5fd29a;
+  --shail-warning:        #e0b65a;
+  --shail-danger:         #e07070;
+}

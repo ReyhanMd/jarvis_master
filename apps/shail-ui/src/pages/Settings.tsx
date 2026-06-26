@@ -123,13 +123,18 @@ export function Settings() {
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => setSettings(null));
-    api.stats().then(setStats).catch(() => setStats(null));
+    const fetchStats = () => api.stats().then(setStats).catch(() => setStats(null));
+    fetchStats();
+    window.addEventListener('shail-stats-updated', fetchStats);
     api.llmSettings().then(s => {
       setLLM(s);
       setProvider(s.active_provider);
       setModel(s.active_model || PROVIDER_DEFAULTS[s.active_provider] || '');
     }).catch(() => setLLM(null));
     pingBackend();
+    return () => {
+      window.removeEventListener('shail-stats-updated', fetchStats);
+    };
   }, []);
 
   const pingBackend = async () => {

@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import { api, getApiKey, AscentSummary } from '../../src/lib/api';
-import { timeAgo, getSourceMeta, isDomainDenied } from '../../src/lib/utils';
-import type { MemoryRecord, SourceApp, StatsResult, SitePolicy } from '../../src/types/contracts';
+import { getSourceMeta, isDomainDenied } from '../../src/lib/utils';
+import type { CaptureSurfaceState, SourceApp, StatsResult, SitePolicy } from '../../src/types/contracts';
 import './style.css';
 
 const MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
@@ -65,7 +65,69 @@ function extractPageContent(): PageInfo {
 const KEY_CAPTURE       = 'shail_capture_enabled';
 const KEY_PAUSED_CONVOS = 'shail_paused_conversations';
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+type SaveState = 'idle' | 'saving' | 'saved' | 'queued' | 'blocked' | 'error';
+type ActiveCaptureCache = {
+  state: string;
+  platform?: string;
+  title?: string;
+  turnCount: number;
+  progressValue?: number;
+  memoryId?: string;
+  captureSource?: 'api' | 'dom_scroll';
+  retroactiveStatus?: string;
+  backendState?: CaptureSurfaceState;
+  errorText?: string;
+};
+
+function captureStageLabel(surface: CaptureSurfaceState | null): string {
+  if (!surface) return 'captured';
+  if (surface.blueprint.present) return 'blueprint_ready';
+  if (surface.blueprint.job_state === 'running') return 'blueprint_extracting';
+  if (surface.blueprint.job_state === 'pending') return 'blueprint_queued';
+  if (surface.blueprint.job_state === 'failed') return 'failed';
+  const stage = surface.pipeline.current_stage || '';
+  if (stage === 'embedded' || stage === 'segmented' || stage === 'captured') return stage;
+  return stage || 'captured';
+}
+
+function detectAiPlatformFromUrl(url?: string): SourceApp | null {
+  if (!url) return null;
+  try {
+    const host = new URL(url).hostname;
+    if (host.includes('chat.openai.com') || host.includes('chatgpt.com')) return 'chatgpt';
+    if (host.includes('claude.ai')) return 'claude';
+    if (host.includes('gemini.google.com') || host.includes('bard.google.com')) return 'gemini';
+    if (host.includes('perplexity.ai')) return 'perplexity';
+    if (host.includes('grok.com') || host.includes('x.ai')) return 'grok';
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function normalizeSourceApp(value?: string): SourceApp | null {
+  if (
+    value === 'chatgpt' ||
+    value === 'claude' ||
+    value === 'gemini' ||
+    value === 'perplexity' ||
+    value === 'grok' ||
+    value === 'web'
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function activeStateLabel(captureEnabled: boolean, activeCapture: ActiveCaptureCache | null, surface: CaptureSurfaceState | null): string {
+  if (!captureEnabled) return 'paused';
+  if (!activeCapture) return 'ready';
+  if (activeCapture.state === 'CAPTURING') return 'capturing';
+  if (activeCapture.state === 'SCROLL_PUMP') return activeCapture.retroactiveStatus || 'retroactive_capture';
+  if (activeCapture.state === 'ERROR') return 'failed';
+  if (activeCapture.retroactiveStatus) return activeCapture.retroactiveStatus;
+  return captureStageLabel(surface);
+}
 
 function Popup() {
   const [authed, setAuthed] = useState<boolean | null>(null);
@@ -76,8 +138,31 @@ function Popup() {
   const [pageInfo, setPageInfo] = useState<PageInfo | null>(null);
   const [pageStatus, setPageStatus] = useState<'loading' | 'ready' | 'already_saved' | 'denied' | 'unavailable'>('loading');
   const [saveState, setSaveState] = useState<SaveState>('idle');
-  const [activeAscent, setActiveAscent] = useState<AscentSummary | null>(null);
+  const [activeAscents, setActiveAscents] = useState<AscentSummary[]>([]);
   const [pinnedAscentId, setPinnedAscentId] = useState<string | null>(null);
+  const [bulkStatus, setBulkStatus] = useState<{ isCycling: boolean; completedCount: number; totalInQueue: number; currentUrl: string } | null>(null);
+  const [activeCapture, setActiveCapture] = useState<ActiveCaptureCache | null>(null);
+  const [captureSurface, setCaptureSurface] = useState<CaptureSurfaceState | null>(null);
+  const [activeTabPlatform, setActiveTabPlatform] = useState<SourceApp | null>(null);
+  const [retroError, setRetroError] = useState('');
+
+  const refreshActiveTabCaptureState = useCallback(async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const platform = detectAiPlatformFromUrl(tab?.url);
+      setActiveTabPlatform(platform);
+      if (!tab?.id || !platform) return;
+      const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_ACTIVE_CAPTURE_STATE' });
+      if (response?.platform) {
+        const capture = response as ActiveCaptureCache;
+        setActiveCapture(capture);
+        if (capture.backendState) setCaptureSurface(capture.backendState);
+        if (capture.errorText) setRetroError(capture.errorText);
+      }
+    } catch {
+      // Content script may not be injected yet; storage cache remains fallback.
+    }
+  }, []);
 
   useEffect(() => {
     // Auth check
@@ -93,8 +178,7 @@ function Popup() {
 
     // Active ascent (best-effort)
     api.listAscents().then(r => {
-      const active = r.items.find(a => a.status === 'active') ?? null;
-      setActiveAscent(active);
+      setActiveAscents(r.items.filter(a => a.status === 'active'));
     }).catch(() => {});
 
     // Pinned ascent from storage
@@ -102,15 +186,37 @@ function Popup() {
       setPinnedAscentId((r['shail_pinned_ascent'] as string) ?? null);
     });
 
+    const refreshSurface = async (capture: ActiveCaptureCache | null) => {
+      const cached = capture?.backendState ?? null;
+      if (cached) setCaptureSurface(cached);
+      if (!capture?.memoryId) return;
+      try {
+        const surface = await api.captureState({ memoryId: capture.memoryId });
+        setCaptureSurface(surface);
+        const stored = await chrome.storage.local.get('shail_capture_state_cache');
+        const cache = (stored['shail_capture_state_cache'] as Record<string, unknown>) ?? {};
+        cache[capture.memoryId] = surface;
+        await chrome.storage.local.set({ shail_capture_state_cache: cache });
+      } catch {
+        // Backend might still be writing the raw transcript.
+      }
+    };
+
     // Capture state
-    chrome.storage.local.get([KEY_CAPTURE, KEY_PAUSED_CONVOS]).then(r => {
+    chrome.storage.local.get([KEY_CAPTURE, KEY_PAUSED_CONVOS, 'shail_bulk_status', 'shail_active_capture']).then(r => {
       setCaptureEnabled((r[KEY_CAPTURE] as boolean) ?? true);
       setPausedConvos((r[KEY_PAUSED_CONVOS] as string[]) ?? []);
+      setBulkStatus((r['shail_bulk_status'] as typeof bulkStatus) ?? null);
+      const capture = (r['shail_active_capture'] as ActiveCaptureCache | undefined) ?? null;
+      setActiveCapture(capture);
+      refreshSurface(capture);
     });
 
     // Page scrape
     chrome.tabs.query({ active: true, currentWindow: true }).then(async tabs => {
       const tab = tabs[0];
+      setActiveTabPlatform(detectAiPlatformFromUrl(tab?.url));
+      refreshActiveTabCaptureState();
       if (!tab?.id) { setPageStatus('unavailable'); return; }
       try {
         const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractPageContent });
@@ -130,7 +236,34 @@ function Popup() {
         setPageStatus(alreadySaved ? 'already_saved' : 'ready');
       } catch { setPageStatus('unavailable'); }
     });
-  }, []);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refreshActiveTabCaptureState();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    // Storage updates listener
+    const storageListener = (changes: Record<string, chrome.storage.StorageChange>, namespace: string) => {
+      if (namespace === 'local') {
+        if (changes['shail_doc_index'] || changes['shail_recent_saves']) {
+          api.stats().then(setStats).catch(() => {});
+        }
+        if (changes['shail_bulk_status']) {
+          setBulkStatus((changes['shail_bulk_status'].newValue as typeof bulkStatus) ?? null);
+        }
+        if (changes['shail_active_capture']) {
+          const capture = (changes['shail_active_capture'].newValue as ActiveCaptureCache | undefined) ?? null;
+          setActiveCapture(capture);
+          refreshSurface(capture);
+        }
+      }
+    };
+    chrome.storage.onChanged.addListener(storageListener);
+    return () => {
+      chrome.storage.onChanged.removeListener(storageListener);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [refreshActiveTabCaptureState]);
 
   const handleToggleCapture = useCallback(async () => {
     const next = !captureEnabled;
@@ -156,20 +289,55 @@ function Popup() {
       const customId = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
       const resp = await chrome.runtime.sendMessage({
         type: 'CAPTURE',
-        payload: { customId, eventType: 'page_visit', sourceApp: 'web', sourceUrl: pageInfo.url, timestamp: ts, title: pageInfo.title, pageContent: pageInfo.text || pageInfo.preview },
+        payload: {
+          customId,
+          eventType: 'page_visit',
+          sourceApp: 'web',
+          sourceUrl: pageInfo.url,
+          timestamp: ts,
+          title: pageInfo.title,
+          pageContent: pageInfo.text || pageInfo.preview,
+          captureMode: 'active',
+          captureInitiator: 'manual',
+        },
       });
-      if (resp?.ok) {
+      const result = resp?.data as { status?: string; memoryId?: string; reason?: string } | undefined;
+      if (resp?.ok && result?.memoryId && !['denied', 'duplicate', 'offline_queued', 'error'].includes(result.status ?? '')) {
         setSaveState('saved');
         setPageStatus('already_saved');
-        const existing = await chrome.storage.local.get('shail_recent_saves');
-        const saves = (existing['shail_recent_saves'] as Array<{ url: string; timestamp: string }>) ?? [];
-        saves.unshift({ url: pageInfo.url, timestamp: ts });
-        await chrome.storage.local.set({ shail_recent_saves: saves.slice(0, 200) });
+      } else if (result?.status === 'duplicate') {
+        setSaveState('saved');
+        setPageStatus('already_saved');
+      } else if (result?.status === 'offline_queued') {
+        setSaveState('queued');
+      } else if (result?.status === 'denied') {
+        setSaveState('blocked');
       } else {
         setSaveState('error');
       }
     } catch { setSaveState('error'); }
   }, [pageInfo]);
+
+  const handleCaptureFullSession = useCallback(async () => {
+    setRetroError('');
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        const response = await chrome.tabs.sendMessage(tab.id, { type: 'TRIGGER_SCROLL_PUMP' });
+        if (response?.state) {
+          setActiveCapture(response as ActiveCaptureCache);
+        }
+        if (response?.retroactiveStatus) {
+          setRetroError('');
+        }
+        if (response?.status && !['started', 'completed'].includes(response.status)) {
+          setRetroError(response.reason || 'Retroactive capture could not start');
+        }
+      }
+    } catch {
+      setRetroError('Retroactive capture is not available on this tab');
+    }
+  }, []);
 
   const handlePinAscent = useCallback(async (id: string | null) => {
     setPinnedAscentId(id);
@@ -177,17 +345,59 @@ function Popup() {
     else await chrome.storage.local.remove('shail_pinned_ascent');
   }, []);
 
-  const openPanel = useCallback(async () => {
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id) { await chrome.sidePanel.open({ tabId: tab.id }); window.close(); return; }
-      if (tab?.windowId) { await chrome.sidePanel.open({ windowId: tab.windowId }); window.close(); return; }
-    } catch { /* ignore */ }
-    openSettings();
-    window.close();
+  const openPanel = useCallback(() => {
+    chrome.storage.local.set({ shail_focus_search: true });
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      const tab = tabs[0];
+      const openWindowPanel = () => {
+        if (!tab?.windowId) {
+          openSettings();
+          window.close();
+          return;
+        }
+        chrome.sidePanel.open({ windowId: tab.windowId })
+          .then(() => window.close())
+          .catch(() => {
+            openSettings();
+            window.close();
+          });
+      };
+
+      if (tab?.id) {
+        chrome.sidePanel.open({ tabId: tab.id })
+          .then(() => window.close())
+          .catch(openWindowPanel);
+        return;
+      }
+      openWindowPanel();
+    });
   }, []);
 
   const openBasecamp = () => { chrome.tabs.create({ url: 'http://localhost:8000/dashboard' }); window.close(); };
+  const aiPlatform = activeTabPlatform;
+  const tabActiveCapture = aiPlatform && normalizeSourceApp(activeCapture?.platform) === aiPlatform ? activeCapture : null;
+  const aiMeta = aiPlatform ? getSourceMeta(aiPlatform) : null;
+  const liveLabel = activeStateLabel(captureEnabled, tabActiveCapture, tabActiveCapture ? captureSurface : null);
+  const isRetroactiveRunning = tabActiveCapture?.state === 'SCROLL_PUMP';
+  const hasAiMemory = !!(tabActiveCapture?.memoryId || captureSurface?.memory_id);
+  const retroButtonLabel = isRetroactiveRunning
+    ? 'Capturing...'
+    : hasAiMemory
+      ? 'Update this memory'
+      : 'Save to this memory';
+  const pageTitle = pageInfo?.title || (pageStatus === 'loading' ? 'Inspecting current page...' : 'Current page');
+  const pageHost = pageInfo?.url ? pageInfo.url.replace(/^https?:\/\//, '').split('/')[0] : 'No capturable page detected yet';
+  const saveButtonLabel =
+    pageStatus === 'loading' ? 'Checking page...' :
+    pageStatus === 'unavailable' ? 'Not capturable' :
+    pageStatus === 'denied' ? 'Site blocked' :
+    pageStatus === 'already_saved' || saveState === 'saved' ? 'Saved to memory' :
+    saveState === 'queued' ? 'Queued offline' :
+    saveState === 'blocked' ? 'Blocked' :
+    saveState === 'error' ? 'Failed - retry' :
+    saveState === 'saving' ? 'Saving...' :
+    'Save to memory';
+  const saveDisabled = pageStatus === 'loading' || pageStatus === 'unavailable' || pageStatus === 'denied' || saveState === 'saving' || pageStatus === 'already_saved' || saveState === 'saved' || saveState === 'queued' || saveState === 'blocked';
 
   return (
     <div style={{ width: 320, background: '#000', color: '#fff', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', display: 'flex', flexDirection: 'column' }}>
@@ -233,62 +443,190 @@ function Popup() {
 
       {/* ── OFFLINE BANNER ── */}
       {backendOk === false && (
-        <div style={{ margin: '10px 12px 0', padding: '8px 12px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, fontSize: 11, color: '#fca5a5' }}>
-          Backend offline — run <code style={{ fontFamily: MONO }}>./shailctl start</code>
+        <div style={{ margin: '10px 12px 0', padding: '8px 12px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, fontSize: 11, color: '#fca5a5', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>Backend offline — run <code style={{ fontFamily: MONO }}>./shailctl start</code></span>
+          <button
+            onClick={() => {
+              chrome.runtime.sendNativeMessage('com.shail.native_host', { action: 'start_backend' }, (res) => {
+                if (chrome.runtime.lastError) {
+                  alert('Failed to start backend: ' + chrome.runtime.lastError.message + '\n\nDid you run install.sh in native-host?');
+                } else {
+                  alert('Backend start initiated: ' + (res?.message || 'Success'));
+                  setTimeout(() => window.location.reload(), 2000);
+                }
+              });
+            }}
+            style={{
+              padding: '4px 8px', background: 'rgba(239,68,68,0.2)', border: 'none', borderRadius: 4,
+              color: '#fca5a5', cursor: 'pointer', fontSize: 10, fontWeight: 500
+            }}
+          >
+            Reboot
+          </button>
         </div>
       )}
 
       <div style={{ padding: '12px 12px 0', display: 'flex', flexDirection: 'column', gap: 10 }}>
 
+        {/* ── PRIMARY ACTIONS ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <button
+            onClick={openPanel}
+            style={{ padding: '9px 0', fontSize: 12, fontWeight: 700, background: 'rgba(34,197,94,0.14)', border: '1px solid rgba(34,197,94,0.35)', borderRadius: 7, color: '#22c55e', cursor: 'pointer' }}
+          >
+            Side Panel
+          </button>
+        </div>
+
         {/* ── CURRENT PAGE ── */}
-        {pageInfo && pageStatus !== 'unavailable' && (
+        {!aiPlatform && (
+        <div>
+          <div style={{ fontSize: 9, color: '#22c55e', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>CURRENT PAGE</div>
+          <div style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ padding: '10px 12px' }}>
+              <div style={{ fontSize: 12, color: '#fff', fontWeight: 500, marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {pageTitle}
+              </div>
+              <div style={{ fontSize: 10, color: '#555', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {pageHost}
+              </div>
+            </div>
+            <div style={{ borderTop: '1px solid #1a1a1a', padding: '8px 12px', display: 'flex', gap: 6 }}>
+              <button
+                onClick={handleSave}
+                disabled={saveDisabled}
+                style={{
+                  flex: 1,
+                  padding: '6px 0',
+                  fontSize: 11,
+                  background:
+                    pageStatus === 'already_saved' || saveState === 'saved' ? 'rgba(34,197,94,0.12)' :
+                    saveState === 'queued' ? 'rgba(59,130,246,0.12)' :
+                    saveState === 'blocked' ? 'rgba(245,158,11,0.12)' :
+                    saveState === 'error' ? 'rgba(239,68,68,0.1)' :
+                    saveDisabled ? '#111' : '#fff',
+                  border:
+                    saveState === 'error' ? '1px solid rgba(239,68,68,0.3)' :
+                    saveState === 'queued' ? '1px solid rgba(59,130,246,0.3)' :
+                    saveState === 'blocked' ? '1px solid rgba(245,158,11,0.35)' :
+                    'none',
+                  borderRadius: 5,
+                  color:
+                    pageStatus === 'already_saved' || saveState === 'saved' ? '#22c55e' :
+                    saveState === 'queued' ? '#60a5fa' :
+                    saveState === 'blocked' ? '#f59e0b' :
+                    saveState === 'error' ? '#fca5a5' :
+                    saveDisabled ? '#555' : '#000',
+                  fontWeight: 600,
+                  cursor: saveDisabled && saveState !== 'error' ? 'default' : 'pointer',
+                }}
+              >
+                {saveButtonLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+        )}
+
+        {/* ── AI CHAT CAPTURE ── */}
+        {aiPlatform && aiMeta && (
           <div>
-            <div style={{ fontSize: 9, color: '#22c55e', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>CURRENT PAGE</div>
-            <div style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 8, overflow: 'hidden' }}>
-              <div style={{ padding: '10px 12px' }}>
-                <div style={{ fontSize: 12, color: '#fff', fontWeight: 500, marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {pageInfo.title || 'Untitled'}
-                </div>
-                <div style={{ fontSize: 10, color: '#555', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {pageInfo.url.replace(/^https?:\/\//, '').split('/')[0]}
-                </div>
+            <div style={{ fontSize: 9, color: aiMeta.color, letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>AI CHAT</div>
+            <div style={{ background: '#0d0d0d', border: '1px solid rgba(245, 158, 11, 0.2)', borderRadius: 8, padding: '10px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: captureEnabled ? aiMeta.color : '#f59e0b', animation: captureEnabled ? 'pulse 1.5s infinite' : 'none' }} />
+                <div style={{ fontSize: 11, color: '#fff', fontWeight: 500 }}>{liveLabel} · {aiMeta.label.toUpperCase()}</div>
               </div>
-              <div style={{ borderTop: '1px solid #1a1a1a', padding: '8px 12px', display: 'flex', gap: 6 }}>
-                {pageStatus === 'denied' ? (
-                  <div style={{ fontSize: 10, color: '#ef4444' }}>Site blocked</div>
-                ) : pageStatus === 'already_saved' || saveState === 'saved' ? (
-                  <div style={{ fontSize: 10, color: '#22c55e' }}>✓ In memory</div>
-                ) : saveState === 'error' ? (
-                  <button onClick={handleSave} style={{ flex: 1, padding: '5px 0', fontSize: 11, background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 5, color: '#fca5a5', cursor: 'pointer' }}>
-                    Failed — retry
-                  </button>
-                ) : (
+              <div style={{ fontSize: 11, color: '#ccc', marginBottom: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {tabActiveCapture?.title || pageInfo?.title || `${aiMeta.label} conversation`}
+              </div>
+              {isRetroactiveRunning ? (
+                <>
+                  <div style={{ height: 4, background: '#1a1a1a', borderRadius: 2, overflow: 'hidden', marginBottom: 6 }}>
+                    <div style={{
+                      width: `${Math.round((tabActiveCapture?.progressValue ?? 0) * 100)}%`,
+                      height: '100%',
+                      background: 'linear-gradient(90deg, #3b82f6, #22c55e)'
+                    }} />
+                  </div>
+                  <div style={{ fontSize: 10, color: '#888', fontFamily: MONO }}>
+                    {tabActiveCapture?.retroactiveStatus || `${tabActiveCapture?.turnCount ?? 0} messages extracted`}
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <button
-                    onClick={handleSave}
-                    disabled={saveState === 'saving'}
-                    style={{ flex: 1, padding: '5px 0', fontSize: 11, background: saveState === 'saving' ? '#111' : '#fff', border: 'none', borderRadius: 5, color: saveState === 'saving' ? '#555' : '#000', fontWeight: 500, cursor: saveState === 'saving' ? 'wait' : 'pointer' }}
+                    onClick={handleCaptureFullSession}
+                    disabled={isRetroactiveRunning}
+                    style={{ flex: 1, padding: '6px 0', fontSize: 11, background: '#3b82f6', border: 'none', borderRadius: 5, color: '#fff', fontWeight: 600, cursor: 'pointer' }}
                   >
-                    {saveState === 'saving' ? 'Saving…' : 'Save to memory'}
+                    {retroButtonLabel}
                   </button>
-                )}
-                <button
-                  onClick={openPanel}
-                  style={{ padding: '5px 10px', fontSize: 11, background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 5, color: '#22c55e', cursor: 'pointer' }}
-                >
-                  Side Panel
-                </button>
-              </div>
+                  <span style={{ fontSize: 10, color: '#888', fontFamily: MONO, whiteSpace: 'nowrap' }}>
+                    {tabActiveCapture?.captureSource === 'api' ? 'API capture' :
+                     tabActiveCapture?.captureSource === 'dom_scroll' ? 'DOM fallback' :
+                     `${tabActiveCapture?.turnCount ?? 0} turns`}
+                  </span>
+                </div>
+              )}
+              {tabActiveCapture?.retroactiveStatus && !isRetroactiveRunning && (
+                <div style={{ marginTop: 6, fontSize: 10, color: '#93c5fd', lineHeight: 1.4 }}>
+                  {tabActiveCapture.retroactiveStatus}
+                </div>
+              )}
+              {retroError && (
+                <div style={{ marginTop: 6, fontSize: 10, color: '#fca5a5', lineHeight: 1.4 }}>
+                  {retroError}
+                </div>
+              )}
             </div>
           </div>
         )}
+
+        {/* ── BULK HISTORY — PHASE 3 ── */}
+        <div>
+          <div style={{ fontSize: 9, color: '#3b82f6', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>BULK HISTORY</div>
+          <div style={{ background: '#0d0d0d', border: '1px solid rgba(59, 130, 246, 0.16)', borderRadius: 8, padding: '10px 12px' }}>
+            {bulkStatus?.isCycling ? (
+              <>
+                <div style={{ fontSize: 11, color: '#fff', fontWeight: 500, marginBottom: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  Capturing historical sessions...
+                </div>
+                <div style={{ height: 4, background: '#1a1a1a', borderRadius: 2, overflow: 'hidden', marginBottom: 6 }}>
+                  <div style={{
+                    width: `${bulkStatus.totalInQueue > 0 ? Math.round((bulkStatus.completedCount / bulkStatus.totalInQueue) * 100) : 0}%`,
+                    height: '100%',
+                    background: 'linear-gradient(90deg, #3b82f6, #22c55e)'
+                  }} />
+                </div>
+                <div style={{ fontSize: 10, color: '#888', fontFamily: MONO }}>
+                  {bulkStatus.completedCount} / {bulkStatus.totalInQueue} captured
+                </div>
+              </>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 11, color: '#ccc', fontWeight: 500 }}>Capture all history</div>
+                  <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>Phase 3 - disabled during active-capture hardening</div>
+                </div>
+                <button
+                  disabled
+                  style={{ padding: '5px 10px', fontSize: 10, background: '#111', border: '1px solid #222', borderRadius: 5, color: '#444', cursor: 'not-allowed', flexShrink: 0 }}
+                >
+                  Later
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* ── STATS ROW ── */}
         {stats && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
             {[
+              { label: 'LOCAL', value: stats.totalLocalMemories },
               { label: 'THIS WEEK', value: stats.memoriesThisWeek },
               { label: 'TOP SOURCE', value: stats.topSource ? getSourceMeta(stats.topSource as SourceApp).label : '—' },
-              { label: 'LAST SAVED', value: stats.lastCaptured ? timeAgo(stats.lastCaptured.timestamp) : '—' },
             ].map(c => (
               <div key={c.label} style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 6, padding: '8px 10px' }}>
                 <div style={{ fontSize: 8, color: '#444', letterSpacing: '0.08em', fontFamily: MONO, marginBottom: 4 }}>{c.label}</div>
@@ -298,11 +636,15 @@ function Popup() {
           </div>
         )}
 
-        {/* ── ACTIVE ASCENT ── */}
-        {activeAscent && (
+        {/* ── ACTIVE ASCENTS ── */}
+        {activeAscents.length > 0 && (
           <div>
-            <div style={{ fontSize: 9, color: '#22c55e', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>ACTIVE ASCENT</div>
-            <div style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ fontSize: 9, color: '#22c55e', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>
+              ACTIVE ASCENT{activeAscents.length > 1 ? 'S' : ''}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {activeAscents.slice(0, 3).map(activeAscent => (
+            <div key={activeAscent.id} style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 8, padding: '10px 12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                 <div style={{ fontSize: 12, color: '#fff', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, marginRight: 8 }}>
                   {activeAscent.name}
@@ -326,30 +668,7 @@ function Popup() {
                 {activeAscent.todos_completed}/{activeAscent.todo_count} TODOS · {Math.round(activeAscent.progress * 100)}%
               </div>
             </div>
-          </div>
-        )}
-
-        {/* ── RECENT ── */}
-        {stats?.recentCaptures && stats.recentCaptures.length > 0 && (
-          <div>
-            <div style={{ fontSize: 9, color: '#22c55e', letterSpacing: '0.1em', fontFamily: MONO, marginBottom: 6 }}>RECENT</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {stats.recentCaptures.slice(0, 3).map(r => {
-                const meta = getSourceMeta(r.sourceApp as SourceApp);
-                return (
-                  <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: 6 }}>
-                    <div style={{ width: 16, height: 16, borderRadius: 3, background: meta.bg, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <span style={{ fontSize: 8, color: meta.color, fontWeight: 700 }}>{meta.label[0]}</span>
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 11, color: '#ccc', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {r.title || r.summary || r.sourceUrl}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 9, color: '#444', fontFamily: MONO, flexShrink: 0 }}>{timeAgo(r.timestamp)}</div>
-                  </div>
-                );
-              })}
+            ))}
             </div>
           </div>
         )}

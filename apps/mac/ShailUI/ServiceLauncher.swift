@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Security
 
 /// Finds the SHAIL repo root and starts/stops all backend services via start_shail.sh / stop_shail.sh.
 /// Path is auto-detected on first launch and persisted in UserDefaults.
@@ -202,6 +203,11 @@ class ServiceLauncher: ObservableObject {
             task.arguments = [scriptPath]
             task.currentDirectoryPath = self.repoRoot
 
+            // Inject master encryption key from macOS Keychain
+            var env = ProcessInfo.processInfo.environment
+            env["SHAIL_TOKEN_KEY"] = self.retrieveOrCreateMasterKey()
+            task.environment = env
+
             let pipe = Pipe()
             task.standardOutput = pipe
             task.standardError = pipe
@@ -217,5 +223,45 @@ class ServiceLauncher: ObservableObject {
                 DispatchQueue.main.async { completion(false, "Exec error: \(error.localizedDescription)") }
             }
         }
+    }
+
+    private func retrieveOrCreateMasterKey() -> String {
+        let service = "shail_system"
+        let account = "shail_master_key"
+        
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        
+        if status == errSecSuccess, let data = dataTypeRef as? Data, let keyStr = String(data: data, encoding: .utf8) {
+            return keyStr
+        }
+        
+        // Generate a new 32-byte key base64 encoded
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let genStatus = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let newKey: String
+        if genStatus == errSecSuccess {
+            newKey = Data(bytes).base64EncodedString()
+        } else {
+            newKey = UUID().uuidString.replacingOccurrences(of: "-", with: "") + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        }
+        
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: newKey.data(using: .utf8)!
+        ]
+        
+        SecItemAdd(attributes as CFDictionary, nil)
+        return newKey
     }
 }

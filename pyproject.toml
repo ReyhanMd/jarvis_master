@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+# Repo has two `shail` packages — top-level `/shail/` and legacy
+# `/apps/shail/shail/`. Default rootdir-import mode would silently prefer
+# the legacy one and break top-level imports inside tests. importlib mode
+# does not mutate sys.path; combined with the explicit `pythonpath`, the
+# top-level package wins deterministically.
+addopts = "--import-mode=importlib"
+pythonpath = ["."]
+testpaths = ["apps/shail/tests"]

@@ -18,6 +18,7 @@ import { Services } from './pages/Services';
 import { Settings } from './pages/Settings';
 import { ExportImport } from './pages/ExportImport';
 import { Graphify } from './pages/Graphify';
+import { LocalFiles } from './pages/LocalFiles';
 import { AuthGate } from './pages/AuthGate';
 import { AnonymousSyncModal } from './components/AnonymousSyncModal';
 import { getApiKey } from './auth';
@@ -62,6 +63,56 @@ export function App() {
     };
   }, []);
 
+  // Connect to the backend WebSocket for real-time cache invalidations
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connect() {
+      ws = new WebSocket('ws://localhost:8000/ws/brain');
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'event' && message.event_type === 'INVALIDATE_CACHE') {
+            console.log('[SHAIL WS] Received cache eviction signal:', message.data);
+            const keys = message.data?.keys || [];
+            if (keys.includes('memories')) {
+              queryClient.invalidateQueries({ queryKey: ['memories'] });
+              queryClient.invalidateQueries({ queryKey: ['memory'] });
+            }
+            if (keys.includes('stats')) {
+              window.dispatchEvent(new CustomEvent('shail-stats-updated'));
+            }
+            window.dispatchEvent(new CustomEvent('shail-socket-invalidation', { detail: message.data }));
+          }
+        } catch (e) {
+          console.error('[SHAIL WS] Message error:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        ws?.close();
+      };
+    }
+
+    if (authed) {
+      connect();
+    }
+
+    return () => {
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    };
+  }, [authed]);
+
   if (!authed) {
     return (
       <QueryClientProvider client={queryClient}>
@@ -90,6 +141,7 @@ export function App() {
             <Route path="/settings"    element={<Settings />} />
             <Route path="/export"      element={<ExportImport />} />
             <Route path="/graphify"    element={<Graphify />} />
+            <Route path="/files"       element={<LocalFiles />} />
           </Routes>
         </main>
         {flag('ui_v2') && <EvidenceRail />}

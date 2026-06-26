@@ -65,8 +65,20 @@ function ActiveAscentPanel({ ascent, onOpen }: { ascent: AscentSummary | null; o
   }
 
   const pct = Math.round(ascent.progress * 100);
-  const dotIdx = Math.min(4, Math.floor(ascent.progress * 5));
+  // 5 nodes: 0=BASE, 2=RIDGE, 4=SUMMIT; positions at 0,1,2,3,4
+  const NODES = 5;
   const stages = ['BASE', 'RIDGE', 'SUMMIT'];
+  // Current position as continuous float (0–4) based on progress
+  const progressPos = ascent.progress * (NODES - 1); // 0.0 – 4.0
+  const activeNodeIdx = Math.floor(progressPos);
+
+  // Derive NEXT STEP from available ascent metadata
+  const completedTodos = ascent.todos_completed;
+  const totalTodos = ascent.todo_count;
+  const remaining = totalTodos - completedTodos;
+  const nextStepText = remaining > 0
+    ? `Complete next ${Math.min(3, remaining)} task${remaining > 1 ? 's' : ''} in "${ascent.name.split(' ').slice(0, 4).join(' ')}" — ${remaining} remaining.`
+    : `All todos complete — review deliverables and mark ascent done.`;
 
   return (
     <div style={{ ...CARD, padding: 18 }}>
@@ -78,35 +90,88 @@ function ActiveAscentPanel({ ascent, onOpen }: { ascent: AscentSummary | null; o
         {ascent.deliverable_count} deliverables · {ascent.todos_completed}/{ascent.todo_count} todos · {timeAgo(ascent.created_at)} old
       </div>
 
-      {/* Stage track */}
-      <div style={{ marginTop: 18, position: 'relative', height: 14 }}>
-        <div style={{ position: 'absolute', left: 0, right: 0, top: 6, height: 1, background: '#1a1a1a' }} />
-        {[0, 1, 2, 3, 4].map(i => {
-          const lit = i <= dotIdx && pct > 0;
+      {/* ── Stage track with connecting line ── */}
+      <div style={{ marginTop: 18, position: 'relative', height: 20 }}>
+
+        {/* Full background track */}
+        <div style={{
+          position: 'absolute', left: 8, right: 8, top: 8,
+          height: 1, background: '#1a1a1a',
+        }} />
+
+        {/* Completed segment — white line from left up to current position */}
+        {pct > 0 && (
+          <div style={{
+            position: 'absolute',
+            left: 8,
+            top: 8,
+            height: 1,
+            width: `calc(${(progressPos / (NODES - 1)) * 100}% - 16px)`,
+            background: 'linear-gradient(90deg, #fff 0%, #888 100%)',
+            transition: 'width 0.5s ease',
+          }} />
+        )}
+
+        {/* Nodes */}
+        {Array.from({ length: NODES }, (_, i) => {
+          const isCompleted = i < activeNodeIdx;
+          const isCurrent = i === activeNodeIdx && pct > 0;
+          const isUpcoming = i > activeNodeIdx || pct === 0;
+
           return (
             <div key={i} style={{
               position: 'absolute',
-              left: `calc(${(i / 4) * 100}% - 4px)`,
-              top: 2,
-              width: 8, height: 8,
-              borderRadius: 4,
-              background: lit ? '#fff' : '#222',
-              border: lit ? '2px solid #fff' : '2px solid #1f1f1f',
+              left: `calc(${(i / (NODES - 1)) * 100}% - 5px)`,
+              top: 3,
+              width: 10, height: 10,
+              borderRadius: 5,
+              background: isCompleted ? '#fff' : isCurrent ? '#22c55e' : '#1a1a1a',
+              border: isCompleted
+                ? '2px solid #fff'
+                : isCurrent
+                  ? '2px solid #22c55e'
+                  : '2px solid #2a2a2a',
+              // Pulse ring on active node
+              boxShadow: isCurrent ? '0 0 0 3px rgba(34,197,94,0.2)' : 'none',
+              zIndex: 2,
+              transition: 'all 0.3s ease',
             }} />
           );
         })}
       </div>
+
+      {/* Stage labels */}
       <div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#444', letterSpacing: '0.1em', fontFamily: MONO }}>
         {stages.map(s => <span key={s}>{s}</span>)}
       </div>
 
       {/* Progress percent */}
-      <div style={{ marginTop: 14, fontSize: 11, color: '#888', fontFamily: MONO }}>
+      <div style={{ marginTop: 10, fontSize: 11, color: '#888', fontFamily: MONO }}>
         {pct}% complete
+      </div>
+
+      {/* ── NEXT STEP card ── */}
+      <div style={{
+        marginTop: 14,
+        padding: '10px 12px',
+        background: '#111',
+        border: '1px solid #1f1f1f',
+        borderRadius: 7,
+      }}>
+        <div style={{
+          fontSize: 9, letterSpacing: '0.12em', color: '#f59e0b',
+          fontFamily: MONO, fontWeight: 700, marginBottom: 6,
+        }}>
+          NEXT STEP
+        </div>
+        <div style={{ fontSize: 12, color: '#ccc', lineHeight: 1.55 }}>
+          {nextStepText}
+        </div>
       </div>
     </div>
   );
 }
+
 
 function CaptureLogPanel({ events, refreshing, onRefresh }: { events: CaptureEvent[]; refreshing: boolean; onRefresh: () => void }) {
   const colorFor = (t: string) => ({

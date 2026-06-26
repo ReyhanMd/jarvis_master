@@ -21,6 +21,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from typing import AsyncIterator, Dict, Optional
 
 import httpx
@@ -37,6 +38,9 @@ _bearer = HTTPBearer(auto_error=False)
 
 # ── Managed subprocesses spawned by this process ─────────────────────────────
 _managed_procs: Dict[str, subprocess.Popen] = {}
+_managed_proc_owners: Dict[str, str] = {}
+_blueprint_ollama_idle_since: Optional[float] = None
+BLUEPRINT_OLLAMA_IDLE_SECONDS = 10
 
 # ── Service definitions ───────────────────────────────────────────────────────
 
@@ -173,6 +177,8 @@ async def _wait_healthy(name: str, timeout: int = 30) -> bool:
 
 async def _start_ollama() -> bool:
     if await _http_ok(OLLAMA_HEALTH):
+        if _managed_proc_owners.get("ollama") == "blueprint_queue":
+            _managed_proc_owners["ollama"] = "manual"
         return True  # already running
     binary = _ollama_binary_path()
     if not binary:
@@ -183,7 +189,77 @@ async def _start_ollama() -> bool:
         stderr=subprocess.DEVNULL,
     )
     _managed_procs["ollama"] = proc
+    _managed_proc_owners["ollama"] = "manual"
     return await _wait_healthy("ollama", timeout=30)
+
+
+async def start_ollama_for_blueprint_queue() -> bool:
+    """Start Ollama for blueprint work only when it is not already running.
+
+    Ownership is explicit. If Ollama was already reachable, SHAIL did not
+    start it and the blueprint queue is not allowed to auto-stop it later.
+    """
+    global _blueprint_ollama_idle_since
+    if await _http_ok(OLLAMA_HEALTH):
+        _blueprint_ollama_idle_since = None
+        return True
+    binary = _ollama_binary_path()
+    if not binary:
+        return False
+    proc = subprocess.Popen(
+        [binary, "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _managed_procs["ollama"] = proc
+    _managed_proc_owners["ollama"] = "blueprint_queue"
+    _blueprint_ollama_idle_since = None
+    return await _wait_healthy("ollama", timeout=30)
+
+
+async def stop_blueprint_queue_ollama_if_idle() -> bool:
+    """Auto-stop only the Ollama process started by blueprint queue.
+
+    Never kills by port and never stops a user/manual Ollama process.
+    """
+    global _blueprint_ollama_idle_since
+    proc = _managed_procs.get("ollama")
+    if _managed_proc_owners.get("ollama") != "blueprint_queue":
+        _blueprint_ollama_idle_since = None
+        return False
+    if proc is None or proc.poll() is not None:
+        _managed_procs.pop("ollama", None)
+        _managed_proc_owners.pop("ollama", None)
+        _blueprint_ollama_idle_since = None
+        return False
+
+    try:
+        from apps.shail.blueprint_queue import stats as queue_stats
+        qs = queue_stats()
+    except Exception:
+        qs = {"pending": 0, "running": 0}
+    if int(qs.get("pending") or 0) > 0 or int(qs.get("running") or 0) > 0:
+        _blueprint_ollama_idle_since = None
+        return False
+
+    now = time.time()
+    if _blueprint_ollama_idle_since is None:
+        _blueprint_ollama_idle_since = now
+        return False
+    if now - _blueprint_ollama_idle_since < BLUEPRINT_OLLAMA_IDLE_SECONDS:
+        return False
+
+    proc.send_signal(signal.SIGTERM)
+    for _ in range(10):
+        if proc.poll() is not None:
+            break
+        await asyncio.sleep(0.5)
+    if proc.poll() is None:
+        proc.kill()
+    _managed_procs.pop("ollama", None)
+    _managed_proc_owners.pop("ollama", None)
+    _blueprint_ollama_idle_since = None
+    return True
 
 
 async def _start_redis() -> bool:
@@ -218,6 +294,7 @@ async def _start_worker() -> bool:
 
 async def _stop_service(name: str) -> bool:
     proc = _managed_procs.pop(name, None)
+    _managed_proc_owners.pop(name, None)
     if proc and proc.poll() is None:
         proc.send_signal(signal.SIGTERM)
         for _ in range(10):
@@ -325,8 +402,17 @@ async def system_status(
     results = {}
     for name in services_to_check:
         results[name] = await _service_status(name)
+        owner = _managed_proc_owners.get(name)
+        if owner:
+            results[name]["managed_owner"] = owner
 
-    return {"services": results, "tier": tier}
+    try:
+        from apps.shail.blueprint_queue import stats as queue_stats
+        blueprint_queue = queue_stats()
+    except Exception:
+        blueprint_queue = {"total": 0, "pending": 0, "running": 0, "done": 0, "failed": 0}
+
+    return {"services": results, "tier": tier, "blueprint_queue": blueprint_queue}
 
 
 @system_router.post("/start")

@@ -31,6 +31,7 @@ from typing import Optional
 
 from apps.shail.llm import call_llm
 from apps.shail.settings import get_settings
+from apps.shail.dynamic_sizing import compute_budget, compute_window_size
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,11 @@ Output STRICT JSON only — no prose, no markdown fences. Schema:
   "extensions": {
      "coding": {"languages_used": [], "files_modified": [], "patterns_applied": []},
      "planning": {"milestones_defined": [], "priorities_set": []}
+  },
+
+  "conversation_metadata": {
+    "turns_analyzed": 0,
+    "is_bulk_import": false
   }
 }
 
@@ -263,13 +269,14 @@ def _parse_blueprint(raw: str) -> Optional[dict]:
 
     # Coerce missing fields to safe defaults rather than reject — partial
     # blueprints are still useful. Handles v1 -> v2 migrations seamlessly.
+    s = get_settings()
     out = {
-        "summary": str(data.get("summary") or "")[:500],
+        "summary": str(data.get("summary") or "")[:s.blueprint_summary_cap_chars],
         "decisions": _coerce_decision_list(data.get("decisions")),
         "questions_answered": _coerce_qa_list(data.get("questions_answered")),
-        "open_questions": _coerce_str_list(data.get("open_questions")),
-        "next_actions": _coerce_str_list(data.get("next_actions")),
-        "key_entities": _coerce_str_list(data.get("key_entities"))[:8],
+        "open_questions": _coerce_str_list(data.get("open_questions"), cap=s.blueprint_max_open_questions),
+        "next_actions": _coerce_str_list(data.get("next_actions"), cap=s.blueprint_max_next_actions),
+        "key_entities": _coerce_str_list(data.get("key_entities"), cap=s.blueprint_max_key_entities),
         "reasoning_chains": _coerce_reasoning_list(data.get("reasoning_chains")),
         "failed_attempts": _coerce_failure_list(data.get("failed_attempts")),
         # Sprint 1: structured retrieval surfaces. Empty by default so old
@@ -289,20 +296,25 @@ def _parse_blueprint(raw: str) -> Optional[dict]:
     return out
 
 
-def _coerce_str_list(v) -> list[str]:
+def _coerce_str_list(v, *, cap: Optional[int] = None) -> list[str]:
     if not isinstance(v, list):
         return []
-    return [str(x).strip()[:300] for x in v if isinstance(x, (str, int, float)) and str(x).strip()][:12]
+    s = get_settings()
+    effective_cap = cap if cap is not None else s.blueprint_max_open_questions
+    item_cap = s.blueprint_value_cap_chars
+    return [str(x).strip()[:item_cap] for x in v if isinstance(x, (str, int, float)) and str(x).strip()][:effective_cap]
 
 
 def _coerce_qa_list(v) -> list[dict]:
     if not isinstance(v, list):
         return []
+    s = get_settings()
     out = []
-    for item in v[:12]:
+    item_cap = s.blueprint_value_cap_chars
+    for item in v[:s.blueprint_max_qa]:
         if isinstance(item, dict):
-            q = str(item.get("q") or item.get("question") or "").strip()[:300]
-            a = str(item.get("a") or item.get("answer") or "").strip()[:300]
+            q = str(item.get("q") or item.get("question") or "").strip()[:item_cap]
+            a = str(item.get("a") or item.get("answer") or "").strip()[:item_cap]
             if q:
                 out.append({"q": q, "a": a})
     return out
@@ -311,12 +323,13 @@ def _coerce_qa_list(v) -> list[dict]:
 def _coerce_code_list(v) -> list[dict]:
     if not isinstance(v, list):
         return []
+    s = get_settings()
     out = []
-    for item in v[:8]:
+    for item in v[:s.blueprint_max_code_refs]:
         if isinstance(item, dict):
             out.append({
                 "language": str(item.get("language") or "").strip()[:30],
-                "purpose":  str(item.get("purpose")  or "").strip()[:200],
+                "purpose":  str(item.get("purpose")  or "").strip()[:s.blueprint_value_cap_chars],
             })
     return out
 
@@ -353,13 +366,14 @@ def _coerce_fact_list(v) -> list[dict]:
     """Generic structured facts. Tolerant: missing keys → None."""
     if not isinstance(v, list):
         return []
+    s = get_settings()
     out: list[dict] = []
-    for item in v[:32]:
+    for item in v[:s.blueprint_max_facts]:
         if not isinstance(item, dict):
             continue
         entity = _strip_or_none(item.get("entity"))
         attribute = _strip_or_none(item.get("attribute"))
-        value = _strip_or_none(item.get("value"), 500)
+        value = _strip_or_none(item.get("value"), s.blueprint_value_cap_chars)
         # Require at least entity OR attribute OR value to be non-empty.
         if not any((entity, attribute, value)):
             continue
@@ -370,9 +384,9 @@ def _coerce_fact_list(v) -> list[dict]:
             "entity":      entity,
             "attribute":   attribute,
             "value":       value,
-            "unit":        _strip_or_none(item.get("unit"), 30),
-            "period":      _strip_or_none(item.get("period"), 60),
-            "source_span": _strip_or_none(item.get("source_span"), 200),
+            "unit":        _strip_or_none(item.get("unit"), 60),
+            "period":      _strip_or_none(item.get("period"), 120),
+            "source_span": _strip_or_none(item.get("source_span"), 400),
             "confidence":  confidence,
         })
     return out
@@ -382,14 +396,15 @@ def _coerce_metric_list(v) -> list[dict]:
     """Numeric KPI rows. `metric` key normalized into `attribute` for storage."""
     if not isinstance(v, list):
         return []
+    s = get_settings()
     out: list[dict] = []
-    for item in v[:32]:
+    for item in v[:s.blueprint_max_metrics]:
         if not isinstance(item, dict):
             continue
         entity = _strip_or_none(item.get("entity"))
         # Accept either "metric" or "attribute" as the attribute name.
         attribute = _strip_or_none(item.get("metric") or item.get("attribute"))
-        value = _strip_or_none(item.get("value"), 500)
+        value = _strip_or_none(item.get("value"), s.blueprint_value_cap_chars)
         if not any((entity, attribute, value)):
             continue
         out.append({
@@ -397,9 +412,9 @@ def _coerce_metric_list(v) -> list[dict]:
             "attribute":   attribute,
             "value":       value,
             "value_num":   _to_float_or_none(item.get("value_num")),
-            "unit":        _strip_or_none(item.get("unit"), 30),
-            "period":      _strip_or_none(item.get("period"), 60),
-            "source_span": _strip_or_none(item.get("source_span"), 200),
+            "unit":        _strip_or_none(item.get("unit"), 60),
+            "period":      _strip_or_none(item.get("period"), 120),
+            "source_span": _strip_or_none(item.get("source_span"), 400),
         })
     return out
 
@@ -407,24 +422,25 @@ def _coerce_metric_list(v) -> list[dict]:
 def _coerce_table_list(v) -> list[dict]:
     if not isinstance(v, list):
         return []
+    s = get_settings()
     out: list[dict] = []
-    for item in v[:8]:
+    for item in v[:s.blueprint_max_tables]:
         if not isinstance(item, dict):
             continue
-        title = _strip_or_none(item.get("title"), 200) or ""
+        title = _strip_or_none(item.get("title"), 400) or ""
         rows_raw = item.get("rows")
         rows: list[dict] = []
         if isinstance(rows_raw, list):
-            for row in rows_raw[:64]:
+            for row in rows_raw[:s.blueprint_max_table_rows]:
                 if isinstance(row, dict):
                     rows.append({
-                        str(k)[:60]: _strip_or_none(val, 300) or ""
+                        str(k)[:120]: _strip_or_none(val, s.blueprint_value_cap_chars) or ""
                         for k, val in row.items()
                     })
         out.append({
             "title":       title,
             "rows":        rows,
-            "source_span": _strip_or_none(item.get("source_span"), 200),
+            "source_span": _strip_or_none(item.get("source_span"), 400),
         })
     return out
 
@@ -432,17 +448,18 @@ def _coerce_table_list(v) -> list[dict]:
 def _coerce_decision_list(v) -> list[dict]:
     if not isinstance(v, list):
         return []
+    s = get_settings()
+    item_cap = s.blueprint_value_cap_chars
     out = []
-    for item in v[:12]:
+    for item in v[:s.blueprint_max_decisions]:
         if isinstance(item, str):
-            # Migrate v1 simple string decisions to v2 structured decisions
-            out.append({"statement": item.strip()[:300], "reasoning": None, "confidence": "medium"})
+            out.append({"statement": item.strip()[:item_cap], "reasoning": None, "confidence": "medium"})
         elif isinstance(item, dict):
-            stmt = str(item.get("statement") or "").strip()[:300]
+            stmt = str(item.get("statement") or "").strip()[:item_cap]
             if stmt:
                 out.append({
                     "statement": stmt,
-                    "reasoning": str(item.get("reasoning") or "").strip()[:300] or None,
+                    "reasoning": str(item.get("reasoning") or "").strip()[:item_cap] or None,
                     "confidence": str(item.get("confidence") or "medium").strip()[:20]
                 })
     return out
@@ -451,15 +468,17 @@ def _coerce_decision_list(v) -> list[dict]:
 def _coerce_reasoning_list(v) -> list[dict]:
     if not isinstance(v, list):
         return []
+    s = get_settings()
+    item_cap = s.blueprint_value_cap_chars
     out = []
-    for item in v[:5]:
+    for item in v[:s.blueprint_max_reasoning_chains]:
         if isinstance(item, dict):
-            conc = str(item.get("conclusion") or "").strip()[:300]
+            conc = str(item.get("conclusion") or "").strip()[:item_cap]
             if conc:
                 out.append({
                     "conclusion": conc,
-                    "steps": _coerce_str_list(item.get("steps")),
-                    "evidence": _coerce_str_list(item.get("evidence")),
+                    "steps": _coerce_str_list(item.get("steps"), cap=s.blueprint_max_open_questions),
+                    "evidence": _coerce_str_list(item.get("evidence"), cap=s.blueprint_max_open_questions),
                 })
     return out
 
@@ -467,16 +486,18 @@ def _coerce_reasoning_list(v) -> list[dict]:
 def _coerce_failure_list(v) -> list[dict]:
     if not isinstance(v, list):
         return []
+    s = get_settings()
+    item_cap = s.blueprint_value_cap_chars
     out = []
-    for item in v[:5]:
+    for item in v[:s.blueprint_max_failed_attempts]:
         if isinstance(item, dict):
-            appr = str(item.get("approach") or "").strip()[:300]
-            fail = str(item.get("failure") or "").strip()[:300]
+            appr = str(item.get("approach") or "").strip()[:item_cap]
+            fail = str(item.get("failure") or "").strip()[:item_cap]
             if appr or fail:
                 out.append({
                     "approach": appr,
                     "failure": fail,
-                    "lesson": str(item.get("lesson") or "").strip()[:300]
+                    "lesson": str(item.get("lesson") or "").strip()[:item_cap]
                 })
     return out
 
@@ -508,21 +529,49 @@ def _merge_blueprints(prior: dict, updated: dict) -> dict:
                 result.append(item)
         return result[:cap]
 
+    s = get_settings()
     merged = dict(updated)
     merged["decisions"] = _union_by_key(
-        prior.get("decisions", []), updated.get("decisions", []), "statement", 12
+        prior.get("decisions", []), updated.get("decisions", []),
+        "statement", s.blueprint_max_decisions,
     )
     merged["questions_answered"] = _union_by_key(
-        prior.get("questions_answered", []), updated.get("questions_answered", []), "q", 20
+        prior.get("questions_answered", []), updated.get("questions_answered", []),
+        "q", s.blueprint_max_qa,
+    )
+    merged["open_questions"] = _union_str(
+        prior.get("open_questions", []), updated.get("open_questions", []),
+        s.blueprint_max_open_questions,
+    )
+    merged["next_actions"] = _union_str(
+        prior.get("next_actions", []), updated.get("next_actions", []),
+        s.blueprint_max_next_actions,
     )
     merged["key_entities"] = _union_str(
-        prior.get("key_entities", []), updated.get("key_entities", []), 8
+        prior.get("key_entities", []), updated.get("key_entities", []),
+        s.blueprint_max_key_entities,
     )
     merged["reasoning_chains"] = _union_by_key(
-        prior.get("reasoning_chains", []), updated.get("reasoning_chains", []), "conclusion", 5
+        prior.get("reasoning_chains", []), updated.get("reasoning_chains", []),
+        "conclusion", s.blueprint_max_reasoning_chains,
     )
     merged["failed_attempts"] = _union_by_key(
-        prior.get("failed_attempts", []), updated.get("failed_attempts", []), "approach", 5
+        prior.get("failed_attempts", []), updated.get("failed_attempts", []),
+        "approach", s.blueprint_max_failed_attempts,
+    )
+    # Union the structured-retrieval surfaces too — they're additive across
+    # windows in chunked extraction, so each window's contribution must survive.
+    merged["facts"] = _union_by_key(
+        prior.get("facts", []), updated.get("facts", []),
+        "value", s.blueprint_max_facts,
+    )
+    merged["metrics"] = _union_by_key(
+        prior.get("metrics", []), updated.get("metrics", []),
+        "value", s.blueprint_max_metrics,
+    )
+    merged["tables"] = _union_by_key(
+        prior.get("tables", []), updated.get("tables", []),
+        "title", s.blueprint_max_tables,
     )
     return merged
 
@@ -684,54 +733,67 @@ async def generate_blueprint(
     extractor_bundle_version: Optional[str] = None,
     fact_source_type: str = "blueprint",
 ) -> Optional[dict]:
-    """Run the extraction/refinement LLM call, parse, save. Best-effort — returns
-    None on failure but never raises into the caller.
+    """Run extraction/refinement with dynamic, context-aware sizing.
 
-    Refinement path: if a prior Blueprint exists for this memory_id, uses a
-    refinement prompt that preserves durable knowledge (decisions, Q&A, etc.)
-    from the prior and integrates new content. Caps new content at 14K to leave
-    headroom for the prior JSON in the LLM context window.
+    Sizing strategy (replaces the old hard 14K/16K caps):
+      1. Compute the per-call content budget from the live model context
+         window minus prompt overhead, prior-blueprint payload, and a
+         response reserve.
+      2. If content fits the budget, run a single LLM call.
+      3. Otherwise split into overlapping windows, extract one partial
+         blueprint per window, and reduce-merge them. The prior blueprint
+         (if any) is folded in as the seed of the reduction.
 
-    Fresh path: if no prior exists, extracts fresh at 16K.
-
-    On parse failure with a prior: preserves the prior (no save) rather than
-    silently wiping accumulated cognition.
+    On parse failure with a prior, the prior is preserved.
     """
+    from apps.shail import pipeline_status as _ps
+
     if not content or len(content.strip()) < 40:
         return None
 
     prior = get_blueprint(memory_id)
+    prior_payload_chars = len(json.dumps(prior, ensure_ascii=False)) if prior else 0
 
-    if prior:
-        content_cap = 14_000
-        system_prompt, user_msg = _build_refinement_prompt(
-            content_type, content[:content_cap], prior
-        )
-        logger.info(
-            "blueprint refinement for %s (prior %dd/%dq, content %d chars)",
-            memory_id,
-            len(prior.get("decisions", [])),
-            len(prior.get("open_questions", [])),
-            len(content),
-        )
-    else:
-        content_cap = 16_000
-        system_prompt, user_msg = _build_initial_prompt(content_type, content[:content_cap])
+    budget = compute_budget(prior_blueprint_chars=prior_payload_chars)
+    content_chars = len(content)
+
+    _ps.mark_stage(
+        memory_id, "blueprint_extracting", "active",
+        size_bytes=content_chars,
+        detail={
+            "budget": budget.to_dict(),
+            "prior_present": bool(prior),
+            "strategy": "single" if content_chars <= budget.content_budget_chars else "chunked",
+        },
+    )
+
+    logger.info(
+        "blueprint %s: content=%d chars, budget=%d chars, prior=%d chars, mode=%s",
+        memory_id, content_chars, budget.content_budget_chars, prior_payload_chars,
+        "refine" if prior else "fresh",
+    )
 
     try:
-        bp = await extract_blueprint(
-            content=content[:content_cap],
-            content_type=content_type,
-            user_id=user_id,
-            prior=prior,
-            refinement_prompts=(system_prompt, user_msg),
-        )
+        if content_chars <= budget.content_budget_chars:
+            bp = await _extract_single(content, content_type, user_id, prior)
+        else:
+            bp = await _extract_chunked(
+                memory_id=memory_id,
+                content=content,
+                content_type=content_type,
+                user_id=user_id,
+                prior=prior,
+                prior_payload_chars=prior_payload_chars,
+            )
     except Exception as e:
         logger.warning("blueprint LLM call failed for %s: %s", memory_id, e)
+        _ps.mark_stage(memory_id, "blueprint_extracting", "failed", error=str(e)[:500])
         return None
 
     if not bp:
         logger.warning("blueprint parse failed for %s", memory_id)
+        _ps.mark_stage(memory_id, "blueprint_extracting", "failed",
+                       error="parse_failure_or_empty")
         if prior:
             logger.info("blueprint parse failed — preserving prior for %s", memory_id)
             return prior
@@ -744,10 +806,88 @@ async def generate_blueprint(
                        materialization_id=materialization_id,
                        extractor_bundle_version=extractor_bundle_version,
                        fact_source_type=fact_source_type)
+        bp_bytes = len(json.dumps(bp, ensure_ascii=False))
+        _ps.mark_stage(memory_id, "blueprint_extracting", "done", size_bytes=bp_bytes)
+        _ps.mark_stage(memory_id, "blueprint_ready", "done", size_bytes=bp_bytes)
     except Exception as e:
         logger.warning("blueprint save failed for %s: %s", memory_id, e)
+        _ps.mark_stage(memory_id, "blueprint_extracting", "failed", error=str(e)[:500])
         return None
     return bp
+
+
+async def _extract_single(
+    content: str,
+    content_type: str,
+    user_id: Optional[str],
+    prior: Optional[dict],
+) -> Optional[dict]:
+    """One LLM call. No truncation here — caller guarantees content fits."""
+    return await extract_blueprint(
+        content=content,
+        content_type=content_type,
+        user_id=user_id,
+        prior=prior,
+    )
+
+
+async def _extract_chunked(
+    *,
+    memory_id: str,
+    content: str,
+    content_type: str,
+    user_id: Optional[str],
+    prior: Optional[dict],
+    prior_payload_chars: int,
+) -> Optional[dict]:
+    """Split content into windows, extract each, reduce-merge.
+
+    The merge is initialized with `prior` (so durable cognition survives) and
+    each window's output is union-merged in. The result is the final blueprint
+    spanning the full content — no tail loss.
+    """
+    window_size, overlap = compute_window_size(
+        transcript_chars=len(content),
+        prior_blueprint_chars=prior_payload_chars,
+    )
+    if overlap >= window_size:
+        overlap = window_size // 5
+
+    step = max(1, window_size - overlap)
+    windows: list[str] = []
+    pos = 0
+    while pos < len(content):
+        end = min(pos + window_size, len(content))
+        windows.append(content[pos:end])
+        if end == len(content):
+            break
+        pos += step
+
+    logger.info(
+        "blueprint %s chunked: %d windows of %d chars (overlap=%d)",
+        memory_id, len(windows), window_size, overlap,
+    )
+
+    merged: Optional[dict] = prior  # may be None
+    for idx, win in enumerate(windows):
+        try:
+            window_bp = await extract_blueprint(
+                content=win,
+                content_type=content_type,
+                user_id=user_id,
+                prior=merged,
+            )
+        except Exception as e:
+            logger.warning("blueprint window %d/%d failed for %s: %s",
+                           idx + 1, len(windows), memory_id, e)
+            continue
+        if not window_bp:
+            continue
+        if merged is None:
+            merged = window_bp
+        else:
+            merged = _merge_blueprints(merged, window_bp)
+    return merged
 
 
 async def extract_blueprint(

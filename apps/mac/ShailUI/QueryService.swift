@@ -45,6 +45,14 @@ final class QueryService {
 
     private let baseURL = URL(string: "http://localhost:8000")!
 
+    // MARK: - Auth helper
+
+    private func authHeaders() -> [String: String] {
+        let key = SettingsManager.shared.settings.apiKey
+        guard !key.isEmpty else { return [:] }
+        return ["Authorization": "Bearer \(key)"]
+    }
+
     // MARK: - Non-streaming (fallback)
 
     func submit(text: String, history: [[String: String]] = []) async throws -> QueryResponse {
@@ -52,6 +60,7 @@ final class QueryService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (k, v) in authHeaders() { request.setValue(v, forHTTPHeaderField: k) }
         request.timeoutInterval = 90
         request.httpBody = try JSONEncoder().encode(QueryRequest(text: text, history: history))
 
@@ -80,6 +89,7 @@ final class QueryService {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        for (k, v) in authHeaders() { req.setValue(v, forHTTPHeaderField: k) }
         req.timeoutInterval = 120
         req.httpBody = try JSONEncoder().encode(QueryRequest(text: text, history: history))
 

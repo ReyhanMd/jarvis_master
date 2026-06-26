@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api, MemoryRecord, SOURCE_COLOR, SOURCE_LABEL } from '../api';
+import { ImportDropzone } from '../components/phase-c/ImportDropzone';
 
 export function ExportImport() {
   const [records, setRecords]       = useState<MemoryRecord[]>([]);
@@ -91,6 +92,14 @@ export function ExportImport() {
             {importResult.skipped === -1 ? 'Import failed — invalid file' : `Imported ${importResult.imported}, skipped ${importResult.skipped} duplicates`}
           </span>
         )}
+      </div>
+
+      {/* Phase C Sprint 4 — import chats from external AI tools */}
+      <div style={{ marginBottom: 32 }}>
+        <div style={{ fontSize: 11, color: '#666', letterSpacing: '0.1em', fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace', marginBottom: 8 }}>
+          IMPORT EXTERNAL CHAT EXPORTS
+        </div>
+        <ImportDropzone />
       </div>
 
       {/* Select all */}

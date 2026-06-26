@@ -23,10 +23,12 @@ from urllib.parse import urlencode
 
 import certifi
 import httpx
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
+from apps.shail.limiter import limiter
 
 from apps.shail.auth_store import create_api_key, create_user, get_user_by_api_key, get_user_by_email
+from apps.shail.auth_api import assert_canonical_email
 
 google_auth_router = APIRouter()
 
@@ -69,7 +71,8 @@ def _get_or_create_user(email: str, name: str) -> tuple[str, str]:
         api_key = create_api_key(existing["id"], label="Google OAuth")
         return api_key, existing["id"]
     try:
-        user = create_user(email=email, password=f"google_sso_{email}", name=name)
+        placeholder_pw = secrets.token_urlsafe(64)
+        user = create_user(email=email, password=placeholder_pw, name=name)
         api_key = create_api_key(user["id"], label="Google OAuth")
         return api_key, user["id"]
     except ValueError:
@@ -83,7 +86,8 @@ def _get_or_create_user(email: str, name: str) -> tuple[str, str]:
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @google_auth_router.get("/start")
-async def google_start(state: str = ""):
+@limiter.limit("10/minute")
+async def google_start(request: Request, state: str = ""):
     """
     Begin Google OAuth2 flow.
     The macOS app generates a UUID state and passes it here so it can poll /token.
@@ -110,7 +114,8 @@ async def google_start(state: str = ""):
 
 
 @google_auth_router.get("/callback")
-async def google_callback(code: str = "", state: str = "", error: str = ""):
+@limiter.limit("10/minute")
+async def google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     """Google redirects here after the user consents (or denies)."""
     if error:
         return HTMLResponse(
@@ -152,6 +157,19 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
     if not email:
         return HTMLResponse("<h2>Could not retrieve email from Google.</h2>", status_code=502)
 
+    # ── Canonical user guard ────────────────────────────────────────────────
+    from apps.shail.settings import get_settings
+    canonical = get_settings().canonical_user_email
+    if canonical and email.lower().strip() != canonical.lower().strip():
+        return HTMLResponse(
+            f"<html><body style='font-family:system-ui;padding:40px;background:#0d0d0f;color:#fff;text-align:center'>"
+            f"<h2 style='color:#ff4d4d'>⛔ Access Denied</h2>"
+            f"<p>This SHAIL instance is restricted to <strong>{canonical}</strong>.</p>"
+            f"<p>You signed in as <strong>{email}</strong>.</p>"
+            f"<p>Please sign in with the correct account.</p></body></html>",
+            status_code=403,
+        )
+
     try:
         api_key, user_id = _get_or_create_user(email, name)
     except Exception as exc:
@@ -159,7 +177,7 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
 
     # Store result for polling
     _tokens[state] = {"email": email, "name": name, "api_key": api_key, "user_id": user_id}
-    del _pending[state]
+    _pending.pop(state, None)
 
     return HTMLResponse("""
     <html>
@@ -174,18 +192,16 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
 
 
 @google_auth_router.get("/token")
-async def google_token_poll(state: str = "", response: Response = None):
+@limiter.limit("60/minute")
+async def google_token_poll(request: Request, state: str = "", response: Response = None):
     """
     Polled by the macOS app every 2 s.
     Returns 200 + JSON when ready, 204 when still waiting.
     """
-    if state and state in _tokens:
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing state parameter")
+    if state in _tokens:
         result = _tokens.pop(state)
-        return result
-    # Without state: return the first available token (single-user convenience)
-    if not state and _tokens:
-        _, result = next(iter(_tokens.items()))
-        _tokens.clear()
         return result
     response.status_code = 204
     return None

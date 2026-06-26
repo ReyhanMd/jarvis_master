@@ -41,14 +41,10 @@ def _verify_password(plain: str, hashed: str) -> bool:
 
 # ── DB connection ─────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    path = get_settings().sqlite_path
-    con = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=30000")
-    con.execute("PRAGMA synchronous=NORMAL")
-    return con
+from apps.shail.db import get_db
+
+def _conn():
+    return get_db()
 
 
 # ── Schema init ───────────────────────────────────────────────────────────────
@@ -202,6 +198,8 @@ def init_auth_db() -> None:
             "ALTER TABLE user_settings ADD COLUMN anthropic_api_key TEXT DEFAULT ''",
             "ALTER TABLE user_settings ADD COLUMN active_provider TEXT DEFAULT 'ollama'",
             "ALTER TABLE user_settings ADD COLUMN active_model TEXT DEFAULT ''",
+            # MCP incremental sync: opaque cursor per provider (ISO ts or page token)
+            "ALTER TABLE mcp_connections ADD COLUMN sync_cursor TEXT",
         ):
             try:
                 con.execute(ddl)
@@ -367,14 +365,17 @@ def get_user_settings(user_id: str) -> dict:
     def col(name: str, default=""):
         return (row[name] if name in keys and row[name] is not None else default)
 
+    # Decrypt LLM provider API keys on read. Stored encrypted via
+    # update_user_settings; legacy plaintext rows pass through unchanged.
+    from apps.shail.crypto import decrypt as _dec_key
     return {
         "capture_enabled":  bool(row["capture_enabled"]),
         "blocked_domains":  json.loads(row["blocked_domains"] or "[]"),
         "ollama_model":     row["ollama_model"] or "",
-        "external_api_key": row["external_api_key"] or "",
+        "external_api_key": _dec_key(row["external_api_key"]) or "",
         "tier":             col("tier", "free"),
-        "openai_api_key":   col("openai_api_key", ""),
-        "anthropic_api_key": col("anthropic_api_key", ""),
+        "openai_api_key":   _dec_key(col("openai_api_key", "")) or "",
+        "anthropic_api_key": _dec_key(col("anthropic_api_key", "")) or "",
         "active_provider":  col("active_provider", "ollama"),
         "active_model":     col("active_model", ""),
     }
@@ -401,6 +402,10 @@ def update_user_settings(user_id: str, **kwargs) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     # Ensure row exists
     get_user_settings(user_id)
+    # Encrypt sensitive fields before persisting. Idempotent — safe to call
+    # repeatedly without re-wrapping.
+    from apps.shail.crypto import encrypt as _enc_key
+    SENSITIVE = {"external_api_key", "openai_api_key", "anthropic_api_key"}
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     values = list(updates.values())
     # Serialize lists to JSON
@@ -409,6 +414,8 @@ def update_user_settings(user_id: str, **kwargs) -> dict:
             values[i] = json.dumps(values[i])
         elif k == "capture_enabled":
             values[i] = int(bool(values[i]))
+        elif k in SENSITIVE and isinstance(values[i], str) and values[i]:
+            values[i] = _enc_key(values[i])
     with _conn() as con:
         con.execute(
             f"UPDATE user_settings SET {set_clause}, updated_at = ? WHERE user_id = ?",

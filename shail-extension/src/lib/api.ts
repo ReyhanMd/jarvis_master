@@ -1,6 +1,7 @@
 import type {
   CaptureCandidate,
   CaptureResult,
+  CaptureSurfaceState,
   ContextBundle,
   EventType,
   GuidancePlan,
@@ -10,6 +11,26 @@ import type {
   SourceApp,
   StatsResult,
 } from '../types/contracts';
+
+// ─── Ascent suggestion types ──────────────────────────────────────────────────
+
+export interface SuggestedMemory {
+  id: string;
+  customId: string;
+  title: string;
+  summary: string;
+  sourceApp: string;
+  timestamp: string;
+  eventType: string;
+  relevance_score: number;
+  deliverable_hint: string;
+}
+
+export interface AscentSuggestionsResponse {
+  suggestions: SuggestedMemory[];
+  ascent_id: string;
+  ascent_name: string;
+}
 
 // ─── Ascent types ─────────────────────────────────────────────────────────────
 
@@ -77,8 +98,28 @@ const LOCAL_BASE   = 'http://localhost:8000/browser';
 const LOCAL_BASE_FB = 'http://127.0.0.1:8000/browser'; // Brave fallback
 const AUTH_BASE    = 'http://localhost:8000/auth';
 const AUTH_BASE_FB = 'http://127.0.0.1:8000/auth';
+const SYSTEM_BASE  = 'http://localhost:8000/system';
+const SYSTEM_BASE_FB = 'http://127.0.0.1:8000/system';
 const HEALTH_URL   = 'http://localhost:8000/health';
 const HEALTH_URL_FB = 'http://127.0.0.1:8000/health';
+
+export interface ServiceStatusInfo {
+  status: 'running' | 'stopped' | 'not_installed' | 'starting' | 'error' | 'unknown';
+  port: number | null;
+  pid: number | null;
+  managed_owner?: string | null;
+}
+
+export interface SystemStatus {
+  services: Record<string, ServiceStatusInfo>;
+  tier: 'free' | 'pro';
+  blueprint_queue?: {
+    pending: number;
+    running: number;
+    done?: number;
+    failed?: number;
+  };
+}
 
 /** Single source of truth for "is the backend reachable?".
  *
@@ -193,8 +234,9 @@ async function localFetch<T>(path: string, init?: RequestInit, base = LOCAL_BASE
     // Brave (and some hardened browsers) block localhost from service workers.
     // Retry with 127.0.0.1 before surfacing BACKEND_OFFLINE to the user.
     if ((err as Error).message === 'BACKEND_OFFLINE') {
-      const fallback = base === LOCAL_BASE ? LOCAL_BASE_FB
-                     : base === AUTH_BASE  ? AUTH_BASE_FB
+      const fallback = base === LOCAL_BASE  ? LOCAL_BASE_FB
+                     : base === AUTH_BASE   ? AUTH_BASE_FB
+                     : base === SYSTEM_BASE ? SYSTEM_BASE_FB
                      : null;
       if (fallback) {
         return await attempt(fallback);
@@ -272,27 +314,62 @@ export const api = {
 
   /** Ingest a capture into local memory via the SHAIL backend. */
   async capture(payload: CaptureCandidate): Promise<CaptureResult> {
-    const result = await localFetch<{ memoryId: string; status: string; summary?: string }>(
-      '/capture',
+    const path = payload.captureMode === 'retroactive' || payload.captureMode === 'bulk'
+      ? '/capture/bulk'
+      : '/capture';
+    const result = await localFetch<{ memoryId: string; status: string; summary?: string; reason?: string }>(
+      path,
       { method: 'POST', body: JSON.stringify(payload) },
     );
     return {
       memoryId: result.memoryId,
-      status:   result.status as 'created' | 'duplicate' | 'denied',
+      status:   result.status as CaptureResult['status'],
       summary:  result.summary,
+      reason:   result.reason,
     };
   },
 
   async captureV2(payload: CaptureCandidate): Promise<CaptureResult> {
-    const result = await localFetch<{ memoryId: string; status: string; summary?: string }>(
+    const result = await localFetch<{ memoryId: string; status: string; summary?: string; reason?: string }>(
       '/capture/v2',
       { method: 'POST', body: JSON.stringify(payload) },
     );
     return {
       memoryId: result.memoryId,
-      status: result.status as 'created' | 'duplicate' | 'denied',
+      status: result.status as CaptureResult['status'],
       summary: result.summary,
+      reason: result.reason,
     };
+  },
+
+  async setRetention(
+    memoryId: string,
+    policy: 'keep_raw' | 'blueprint_only' | 'decide_later',
+  ): Promise<{ ok: boolean; retention_policy?: string; redacted?: boolean }> {
+    return localFetch(
+      `/memories/${encodeURIComponent(memoryId)}/retention`,
+      { method: 'POST', body: JSON.stringify({ policy }) },
+    );
+  },
+
+  async captureState(params: {
+    memoryId?: string;
+    conversationId?: string;
+    sourceUrl?: string;
+  }): Promise<CaptureSurfaceState> {
+    const q = new URLSearchParams();
+    if (params.memoryId) q.set('memory_id', params.memoryId);
+    if (params.conversationId) q.set('conversation_id', params.conversationId);
+    if (params.sourceUrl) q.set('source_url', params.sourceUrl);
+    return localFetch<CaptureSurfaceState>(`/captures/state?${q.toString()}`);
+  },
+
+  async systemStatus(): Promise<SystemStatus> {
+    return localFetch<SystemStatus>('/status', undefined, SYSTEM_BASE);
+  },
+
+  systemRestartUrl(service: string): string {
+    return `${SYSTEM_BASE}/restart/${encodeURIComponent(service)}`;
   },
 
   /**
@@ -400,6 +477,7 @@ export const api = {
     const recent  = sorted.slice(0, 3).map(indexEntryToRecord);
 
     return {
+      totalLocalMemories: index.length,
       memoriesThisWeek,
       topSource,
       lastCaptured:    recent[0] ?? null,
@@ -410,9 +488,19 @@ export const api = {
   /** Delete a memory from local storage via the SHAIL backend. */
   async deleteMemory(id: string): Promise<void> {
     await localFetch<{ ok: boolean; id: string }>(
-      `/memories/${id}`,
+      `/memories/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
     );
+    const stored = await browser.storage.local.get(['shail_doc_index', 'shail_recent_saves']);
+    const index = (stored['shail_doc_index'] as DocIndexEntry[]) ?? [];
+    const recentSaves = (stored['shail_recent_saves'] as Array<{ url: string; timestamp: string }>) ?? [];
+    const removed = index.find(e => e.id === id || e.customId === id);
+    await browser.storage.local.set({
+      shail_doc_index: index.filter(e => e.id !== id && e.customId !== id),
+      shail_recent_saves: removed?.sourceUrl
+        ? recentSaves.filter(e => e.url !== removed.sourceUrl)
+        : recentSaves,
+    });
   },
 
   /**
@@ -452,7 +540,7 @@ export const api = {
   async getFullContent(id: string): Promise<{ content: string; eventType: EventType }> {
     const item = await localFetch<{
       id: string; eventType: string; content?: string; summary: string;
-    }>(`/memories/${id}`);
+    }>(`/memories/${encodeURIComponent(id)}`);
     return {
       content:   item.content ?? item.summary ?? '',
       eventType: (item.eventType as EventType) ?? 'page_visit',
@@ -478,6 +566,14 @@ export const api = {
     return localFetch<AscentDetail>(
       `/ascents/${ascentId}/todos/${todoId}`,
       { method: 'PUT', body: JSON.stringify({ completed }) },
+      'http://localhost:8000/browser',
+    );
+  },
+
+  async getAscentSuggestions(ascentId: string, limit = 8): Promise<AscentSuggestionsResponse> {
+    return localFetch<AscentSuggestionsResponse>(
+      `/ascents/${ascentId}/suggestions?limit=${limit}`,
+      undefined,
       'http://localhost:8000/browser',
     );
   },

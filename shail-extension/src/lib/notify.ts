@@ -27,7 +27,7 @@ let activeCleanup: (() => void) | null = null;
 function getAppLabel(app: SourceApp): string {
   const map: Record<SourceApp, string> = {
     chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini',
-    perplexity: 'Perplexity', web: 'Web Page',
+    perplexity: 'Perplexity', grok: 'Grok', web: 'Web Page',
   };
   return map[app] ?? 'AI';
 }
@@ -35,7 +35,7 @@ function getAppLabel(app: SourceApp): string {
 function getAppColor(app: SourceApp): string {
   const map: Record<SourceApp, string> = {
     chatgpt: '#10a37f', claude: '#d97706', gemini: '#4285f4',
-    perplexity: '#7c3aed', web: '#22c55e',
+    perplexity: '#7c3aed', grok: '#e5e5e5', web: '#22c55e',
   };
   return map[app] ?? '#22c55e';
 }
