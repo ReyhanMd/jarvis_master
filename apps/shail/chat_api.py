@@ -203,6 +203,45 @@ def _apply_time_decay(
     scored.sort(key=lambda x: x[1])
     return [h for h, _ in scored[:k]]
 
+
+def _browser_lexical_memory_hits(query: str, namespace: str, *, k: int = RAG_K) -> List[tuple]:
+    """Exact/keyword browser-memory hits for sidepanel Ask.
+
+    This makes Ollama answers use the same safety net as sidepanel Browse:
+    exact chart titles, facts, and numbers can be found from raw transcripts
+    even when vector retrieval is stale or misses the phrase.
+    """
+    try:
+        from apps.shail import browser_api as _browser
+    except Exception:
+        return []
+
+    terms = _browser._query_terms(query)
+    namespaces = [namespace]
+    if namespace != _browser.NS_BROWSER:
+        namespaces.append(_browser.NS_BROWSER)
+
+    ranked: dict[str, tuple[str, float, dict]] = {}
+    for ns in namespaces:
+        try:
+            records = _browser._collect_user_capture_records(ns)
+        except Exception as exc:
+            logger.debug("browser lexical chat lookup skipped for %s: %s", ns, exc)
+            continue
+        for record_id, record in records.items():
+            content = record.get("content") or ""
+            meta = _browser.normalize_browser_metadata(record.get("metadata") or {}, content)
+            score = _browser._lexical_score_capture(query, terms, content, meta)
+            if score <= 0:
+                continue
+            meta.setdefault("customId", record_id)
+            meta.setdefault("id", record_id)
+            existing = ranked.get(record_id)
+            if not existing or score > existing[1]:
+                ranked[record_id] = (content, score, meta)
+
+    return sorted(ranked.values(), key=lambda h: h[1], reverse=True)[:k]
+
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 def _require_user(credentials: Optional[HTTPAuthorizationCredentials]) -> str:
@@ -556,10 +595,12 @@ async def _build_context(
     namespace = f"user_{user_id}"
 
     async def _rag() -> list:
+        lexical_hits = await asyncio.to_thread(_browser_lexical_memory_hits, query, namespace, k=RAG_K)
         # Sprint 3 PR3 — flag-gated hybrid retrieval. Default OFF preserves
         # legacy semantic-only path bit-for-bit. Hybrid returns the same
         # `(content, score, metadata)` tuple shape so the rest of
         # `_build_context` is untouched.
+        semantic_hits: list = []
         if get_settings().shail_hybrid_retrieval:
             try:
                 hits = await _hybrid_search(
@@ -567,16 +608,24 @@ async def _build_context(
                     k=RAG_K, overfetch_k=RAG_K_OVERFETCH,
                     task_id=task_id,
                 )
-                return [h for h in hits if (h[2] or {}).get("source") != "local_file"]
+                semantic_hits = [h for h in hits if (h[2] or {}).get("source") != "local_file"]
             except Exception as e:
                 logger.warning("hybrid_search failed; falling back to legacy rag: %s", e)
-        try:
-            raw = rag_search(query, k=RAG_K_OVERFETCH, namespace=namespace)
-            raw = [h for h in raw if (h[2] or {}).get("source") != "local_file"]
-            return _apply_time_decay(raw, k=RAG_K)
-        except Exception as e:
-            logger.warning("rag_search failed in chat: %s", e)
-            return []
+        if not semantic_hits:
+            try:
+                raw = rag_search(query, k=RAG_K_OVERFETCH, namespace=namespace)
+                raw = [h for h in raw if (h[2] or {}).get("source") != "local_file"]
+                semantic_hits = _apply_time_decay(raw, k=RAG_K)
+            except Exception as e:
+                logger.warning("rag_search failed in chat: %s", e)
+
+        merged: dict[str, tuple] = {}
+        for hit in [*lexical_hits, *semantic_hits]:
+            meta = (hit[2] or {}) if len(hit) >= 3 else {}
+            mid = meta.get("customId") or meta.get("id") or meta.get("memory_id") or str(len(merged))
+            if mid not in merged:
+                merged[mid] = hit
+        return list(merged.values())[:RAG_K]
 
     async def _past() -> list:
         if not references_prior_chat(query, is_first_in_session=is_first_in_session):

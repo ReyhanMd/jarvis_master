@@ -99,7 +99,7 @@ export default defineContentScript({
     let shadow: ShadowRoot | null = null;
     let collapsed = false;
     let barPosition: { left?: number; top?: number; right?: number; bottom?: number } = { right: 16, bottom: 16 };
-    const logoUrl = browser.runtime.getURL('/icon/shail-official.png' as any);
+    const logoUrl = browser.runtime.getURL('icon/shail-official.png' as any);
 
     function escapeHtml(value: string): string {
       return value.replace(/[&<>"']/g, ch => ({
@@ -192,6 +192,7 @@ export default defineContentScript({
           : await api.captureState({ conversationId: adapter.getChatID(), sourceUrl: location.href });
         backendState = surface;
         memoryId = surface.memory_id || memoryId;
+        if (memoryId) await showBar();
         errorText = '';
         renderBar();
         syncState();
@@ -216,6 +217,11 @@ export default defineContentScript({
       renderBar();
     }
 
+    async function showBar() {
+      await createBar();
+      renderBar();
+    }
+
     function renderBar() {
       if (!shadow) return;
       const title = adapter.detectChatTitle();
@@ -234,6 +240,7 @@ export default defineContentScript({
         state === 'PAUSED' ? 'Paused' :
         state === 'SCROLL_PUMP' ? (retroactiveStatus || 'Retroactive capture') :
         state === 'ERROR' ? (errorText || 'Error') :
+        state === 'LISTENING' ? (backendState ? `Capturing - ${pipelineLabel(backendState)}` : 'Capturing') :
         retroactiveStatus || pipelineLabel(backendState);
       const turnLabel = `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`;
 
@@ -393,7 +400,7 @@ export default defineContentScript({
           ${state !== 'PAUSED' && state !== 'EXCLUDED' ? `<button class="btn" id="pause-btn">Pause</button>` : ''}
           ${state === 'PAUSED' ? `<button class="btn" id="resume-btn">Resume</button>` : ''}
           ${state !== 'EXCLUDED' ? `<button class="btn btn-red" id="end-btn">End</button>` : ''}
-          <label><input type="checkbox" id="stop-toggle" ${state === 'EXCLUDED' ? 'checked' : ''}/> Stop</label>
+          <label><input type="checkbox" id="stop-toggle" ${state === 'EXCLUDED' ? 'checked' : ''}/> ${state === 'EXCLUDED' ? 'Start scanning' : 'Stop capturing'}</label>
           <a href="#" id="view-link">View Transcript</a>
           <button class="btn icon-btn" id="collapse-btn" title="Collapse">‹</button>
         </div>
@@ -437,8 +444,13 @@ export default defineContentScript({
       shadow.getElementById('stop-toggle')?.addEventListener('change', async (e) => {
         const checked = (e.target as HTMLInputElement).checked;
         await setConversationExcluded(adapter, checked);
-        if (checked) setState('EXCLUDED');
-        else await refreshPolicy();
+        retroactiveStatus = '';
+        errorText = '';
+        if (checked) {
+          setState('EXCLUDED');
+        } else {
+          await refreshPolicy();
+        }
       });
       shadow.getElementById('view-link')?.addEventListener('click', (e) => {
         e.preventDefault();
@@ -453,6 +465,7 @@ export default defineContentScript({
     }
 
     async function handleCaptureFullSession(conversationId: string, config: ScrollConfig) {
+      await showBar();
       setState('SCROLL_PUMP');
       try {
         const apiCandidate = await getApiSessionCapture(config.sourceApp, conversationId);
@@ -570,6 +583,7 @@ export default defineContentScript({
       const detail = event.detail as { state?: string; turnCount?: number; memoryId?: string };
       if (detail.turnCount !== undefined) turnCount = detail.turnCount;
       if (detail.memoryId) memoryId = detail.memoryId;
+      if (detail.state === 'capturing' || detail.state === 'captured' || detail.memoryId) void showBar();
       switch (detail.state) {
         case 'capturing':
           setState('CAPTURING');
@@ -805,7 +819,6 @@ export default defineContentScript({
       shadow.getElementById('modal-cancel')?.addEventListener('click', close);
     }
 
-    void createBar();
     refreshPolicy();
     refreshBackendState();
     updateTurnCountFromDom();
@@ -818,6 +831,7 @@ export default defineContentScript({
         const next = changes[KEY_ACTIVE_CAPTURE].newValue as { memoryId?: string; backendState?: CaptureSurfaceState } | undefined;
         memoryId = next?.memoryId || memoryId;
         backendState = next?.backendState || backendState;
+        if (memoryId || backendState?.memory_id) void showBar();
         renderBar();
       }
     });

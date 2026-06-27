@@ -323,7 +323,17 @@ function Popup() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab?.id) {
-        const response = await chrome.tabs.sendMessage(tab.id, { type: 'TRIGGER_SCROLL_PUMP' });
+        const sendTrigger = () => chrome.tabs.sendMessage(tab.id!, { type: 'TRIGGER_SCROLL_PUMP' });
+        let response: any;
+        try {
+          response = await sendTrigger();
+        } catch {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content-scripts/floating-bar.js'],
+          });
+          response = await sendTrigger();
+        }
         if (response?.state) {
           setActiveCapture(response as ActiveCaptureCache);
         }
@@ -334,8 +344,9 @@ function Popup() {
           setRetroError(response.reason || 'Retroactive capture could not start');
         }
       }
-    } catch {
-      setRetroError('Retroactive capture is not available on this tab');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '';
+      setRetroError(message || 'Retroactive capture could not start on this tab');
     }
   }, []);
 

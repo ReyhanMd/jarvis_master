@@ -179,6 +179,77 @@ def test_browser_search_shows_raw_pending_capture_before_embedding(isolated_db, 
     assert result.items[0].title == "Pending Chart"
 
 
+def test_browser_search_exact_title_works_without_vector_search(isolated_db, monkeypatch):
+    from apps.shail import browser_api
+    from apps.shail import raw_transcripts as rt
+
+    rt.save(
+        memory_id="chart_exact_title_1",
+        user_id="u1",
+        namespace="user_u1",
+        content_type="ai_conversation",
+        content="[gemini] Shail Research for technology leverage Analysis\n\nUser: build the chart\n\nAssistant: chart body",
+        metadata={
+            "customId": "chart_exact_title_1",
+            "eventType": "ai_conversation",
+            "sourceApp": "gemini",
+            "sourceUrl": "https://gemini.google.com/app/chart_exact_title_1",
+            "title": "Shail Research for technology leverage Analysis",
+            "summary": "Gemini chart about technology leverage",
+            "timestamp": "2026-06-22T05:02:00+00:00",
+        },
+    )
+    monkeypatch.setattr(browser_api, "_get_namespace", lambda _credentials: "user_u1")
+    monkeypatch.setattr(browser_api, "_get_store", lambda: EmptyVectorStore())
+    monkeypatch.setattr(browser_api, "rag_search", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("vectors down")))
+
+    result = _run(browser_api.search_memories(
+        browser_api.SearchRequest(query="Shail Research for technology leverage Analysis", k=10),
+        credentials=None,
+    ))
+
+    assert result.total == 1
+    assert result.items[0].id == "chart_exact_title_1"
+
+
+def test_browser_search_finds_fact_or_number_inside_raw_transcript(isolated_db, monkeypatch):
+    from apps.shail import browser_api
+    from apps.shail import raw_transcripts as rt
+
+    rt.save(
+        memory_id="chart_number_fact_1",
+        user_id="u1",
+        namespace="user_u1",
+        content_type="ai_conversation",
+        content=(
+            "[claude] SaaS metrics diagnostic\n\n"
+            "User: inspect the chart\n\n"
+            "Assistant: The diagnostic chain shows ARR expansion of 42.7% "
+            "and net revenue retention of 118% for the enterprise cohort."
+        ),
+        metadata={
+            "customId": "chart_number_fact_1",
+            "eventType": "ai_conversation",
+            "sourceApp": "claude",
+            "sourceUrl": "https://claude.ai/chat/chart_number_fact_1",
+            "title": "SaaS metrics diagnostic",
+            "summary": "Enterprise cohort metrics",
+            "timestamp": "2026-06-22T05:03:00+00:00",
+        },
+    )
+    monkeypatch.setattr(browser_api, "_get_namespace", lambda _credentials: "user_u1")
+    monkeypatch.setattr(browser_api, "_get_store", lambda: EmptyVectorStore())
+    monkeypatch.setattr(browser_api, "rag_search", lambda *a, **k: [])
+
+    result = _run(browser_api.search_memories(
+        browser_api.SearchRequest(query="ARR expansion 42.7%", k=10),
+        credentials=None,
+    ))
+
+    assert result.total == 1
+    assert result.items[0].id == "chart_number_fact_1"
+
+
 def test_browser_get_memory_falls_back_to_raw_pending_capture(isolated_db, monkeypatch):
     from apps.shail import browser_api
     from apps.shail import raw_transcripts as rt

@@ -378,6 +378,69 @@ def _parse_capture_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
+def _query_terms(query: str) -> List[str]:
+    return [t for t in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(t) > 1]
+
+
+def _search_norm(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def _lexical_score_capture(query: str, terms: List[str], content: str, meta: Dict[str, Any]) -> float:
+    """Deterministic keyword layer for sidepanel/dashboard search.
+
+    Vector search is good for meaning, but users often search exact chart
+    titles, app names, URLs, or project phrases. This score makes those exact
+    matches reliably surface even when embeddings are stale or pending.
+    """
+    q = query.lower().strip()
+    q_norm = _search_norm(query)
+    if not q:
+        return 0.0
+    title = str(meta.get("title") or "").lower()
+    summary = str(meta.get("summary") or "").lower()
+    source_app = str(meta.get("sourceApp") or "").lower()
+    source_url = str(meta.get("sourceUrl") or "").lower()
+    content_l = content[:20000].lower()
+    haystack = f"{title}\n{summary}\n{source_app}\n{source_url}\n{content_l}"
+    title_norm = _search_norm(title)
+    summary_norm = _search_norm(summary)
+    haystack_norm = _search_norm(haystack)
+
+    score = 0.0
+    if title == q:
+        score += 100.0
+    if title_norm and title_norm == q_norm:
+        score += 90.0
+    if q in title:
+        score += 70.0
+    if q_norm and q_norm in title_norm:
+        score += 60.0
+    if q in summary:
+        score += 20.0
+    if q_norm and q_norm in summary_norm:
+        score += 16.0
+    if q in source_url or q == source_app:
+        score += 8.0
+    if q in haystack:
+        score += 6.0
+    if q_norm and q_norm in haystack_norm:
+        score += 5.0
+
+    if terms:
+        title_hits = sum(1 for t in terms if t in title_norm)
+        summary_hits = sum(1 for t in terms if t in summary_norm)
+        body_hits = sum(1 for t in terms if t in haystack_norm)
+        coverage = body_hits / max(len(terms), 1)
+        score += title_hits * 7.0
+        score += summary_hits * 3.0
+        score += coverage * 6.0
+        if body_hits == len(terms):
+            score += 5.0
+
+    return score
+
+
 def _collect_user_capture_records(namespace: str) -> Dict[str, Dict[str, Any]]:
     """Return one full-fidelity row per logical capture for dashboard metrics.
 
@@ -810,6 +873,8 @@ async def search_memories(
 
                 if req.after:
                     items = [i for i in items if i.timestamp >= req.after]
+                if req.sourceApp:
+                    items = [i for i in items if i.sourceApp == req.sourceApp]
                 items.sort(key=lambda x: x.timestamp, reverse=True)
                 return SearchResponse(items=items[: req.k], total=len(items))
             else:
@@ -820,7 +885,9 @@ async def search_memories(
                         for raw in _rt.list_recent(namespace=namespace, limit=req.k, after=req.after)
                         if is_browser_memory(raw.get("metadata") or {}, raw.get("content") or "")
                     ]
-                    return SearchResponse(items=raw_items, total=len(raw_items))
+                    if req.sourceApp:
+                        raw_items = [i for i in raw_items if i.sourceApp == req.sourceApp]
+                    return SearchResponse(items=raw_items[: req.k], total=len(raw_items))
                 except Exception as raw_exc:
                     logger.warning("Raw transcript browse fallback failed: %s", raw_exc)
                     return SearchResponse(items=[], total=0)
@@ -828,37 +895,60 @@ async def search_memories(
             logger.error("Browse failed: %s", exc)
             return SearchResponse(items=[], total=0)
 
-    # ── Semantic search ────────────────────────────────────────────────────
-    try:
-        results = rag_search(query=req.query, k=req.k, namespace=namespace)
-        # Signed-in users: also search anonymous namespace and merge
-        if namespace != NS_BROWSER:
-            try:
-                anon_results = rag_search(query=req.query, k=req.k, namespace=NS_BROWSER)
-                results = list(results) + list(anon_results)
-            except Exception:
-                pass
-    except Exception as exc:
-        logger.error("Search failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    ranked: Dict[str, tuple[MemoryItem, float]] = {}
+    terms = _query_terms(req.query)
+    namespaces = [namespace]
+    if namespace != NS_BROWSER:
+        namespaces.append(NS_BROWSER)
 
-    seen_ids: set = set()
-    items = []
-    for content, dist_score, metadata in results:
-        if not is_browser_memory(metadata or {}, content):
+    # Lexical search is the guaranteed path. It searches raw transcript rows and
+    # vector metadata/content directly, so exact titles, facts, and numbers work
+    # even before embeddings finish or when the embedder is offline.
+    for ns in namespaces:
+        try:
+            for record_id, record in _collect_user_capture_records(ns).items():
+                content = record.get("content") or ""
+                metadata = normalize_browser_metadata(record.get("metadata") or {}, content)
+                lexical = _lexical_score_capture(req.query, terms, content, metadata)
+                if lexical <= 0:
+                    continue
+                existing = ranked.get(record_id)
+                item = existing[0] if existing else _meta_to_item(record_id, content, 0.0, metadata)
+                combined = (existing[1] if existing else 0.0) + lexical
+                item.score = round(combined, 4)
+                ranked[record_id] = (item, combined)
+        except Exception as exc:
+            logger.warning("Lexical search merge failed for %s: %s", ns, exc)
+
+    # Semantic search is an optional boost, not the source of truth. If it fails,
+    # exact/keyword search still returns usable results.
+    semantic_k = min(max(req.k * 3, 50), 100)
+    for ns in namespaces:
+        try:
+            results = rag_search(query=req.query, k=semantic_k, namespace=ns)
+        except Exception as exc:
+            logger.warning("Semantic search failed for %s: %s", ns, exc)
             continue
-        metadata = normalize_browser_metadata(metadata or {}, content)
-        record_id = metadata.get("customId") or metadata.get("id") or str(uuid.uuid4())
-        if record_id in seen_ids:
-            continue
-        seen_ids.add(record_id)
-        similarity = max(0.0, 1.0 - dist_score / 2.0)
-        items.append(_meta_to_item(record_id, content, similarity, metadata))
+        for content, dist_score, metadata in results:
+            if not is_browser_memory(metadata or {}, content):
+                continue
+            metadata = normalize_browser_metadata(metadata or {}, content)
+            record_id = metadata.get("customId") or metadata.get("id") or str(uuid.uuid4())
+            similarity = max(0.0, 1.0 - dist_score / 2.0)
+            existing = ranked.get(record_id)
+            item = existing[0] if existing else _meta_to_item(record_id, content, similarity, metadata)
+            combined = (existing[1] if existing else 0.0) + similarity
+            item.score = round(combined, 4)
+            ranked[record_id] = (item, combined)
+
+    items = [item for item, _score in ranked.values()]
 
     # Sort by relevance then date-filter
     items.sort(key=lambda x: x.score or 0.0, reverse=True)
     if req.after:
         items = [i for i in items if i.timestamp >= req.after]
+    if req.sourceApp:
+        items = [i for i in items if i.sourceApp == req.sourceApp]
 
     return SearchResponse(items=items[: req.k], total=len(items))
 
