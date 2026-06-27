@@ -50,6 +50,13 @@ export function submitDomCaptureBuffer(candidate: CaptureCandidate) {
   pendingDomCaptures.set(key, { candidate, timeoutId });
 }
 
+export function cancelDomCaptureBuffer(conversationId: string) {
+  const pending = pendingDomCaptures.get(conversationId);
+  if (!pending) return;
+  clearTimeout(pending.timeoutId);
+  pendingDomCaptures.delete(conversationId);
+}
+
 /**
  * Submits an API-based capture. This immediately sends the API capture
  * and cancels any pending DOM capture for the same conversation.
@@ -60,8 +67,7 @@ export async function submitApiCaptureBuffer(candidate: CaptureCandidate) {
     
     // Cancel the DOM capture if it's pending
     if (pendingDomCaptures.has(key)) {
-      clearTimeout(pendingDomCaptures.get(key)!.timeoutId);
-      pendingDomCaptures.delete(key);
+      cancelDomCaptureBuffer(key);
       console.log(`[SHAIL Race-Lock] Discarded DOM capture for ${key} in favor of API capture.`);
     }
   }
@@ -81,8 +87,7 @@ export async function submitApiCaptureBuffer(candidate: CaptureCandidate) {
 export function flushDomCaptureBuffer(conversationId: string) {
   const pending = pendingDomCaptures.get(conversationId);
   if (pending) {
-    clearTimeout(pending.timeoutId);
-    pendingDomCaptures.delete(conversationId);
+    cancelDomCaptureBuffer(conversationId);
     sendCapture(pending.candidate).catch(console.error);
   }
 }

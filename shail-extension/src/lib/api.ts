@@ -391,7 +391,15 @@ export const api = {
       try {
         const resp = await localFetch<{ items: MemoryRecord[]; total: number }>(
           '/search',
-          { method: 'POST', body: JSON.stringify({ query: '', k: 100, after: payload.after ?? undefined }) },
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              query: '',
+              k: 100,
+              after: payload.after ?? undefined,
+              sourceApp: payload.filters?.sourceApp,
+            }),
+          },
         );
         items = resp.items;
       } catch (err) {
@@ -408,7 +416,15 @@ export const api = {
       // ── Search: call backend ──────────────────────────────────────────────
       const resp = await localFetch<{ items: MemoryRecord[]; total: number }>(
         '/search',
-        { method: 'POST', body: JSON.stringify({ query: payload.query.trim(), k: 30, after: payload.after ?? undefined }) },
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            query: payload.query.trim(),
+            k: 80,
+            after: payload.after ?? undefined,
+            sourceApp: payload.filters?.sourceApp,
+          }),
+        },
       );
       items = resp.items;
       // Results from backend already sorted by relevance score — preserve order.

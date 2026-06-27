@@ -13,6 +13,8 @@ import { injectText } from '../src/lib/inject';
 import { parseApiPayload, parseApiSessionPayload } from '../src/lib/api-parsers';
 import { saveApiSessionCapture } from '../src/lib/api-capture-cache';
 import { submitApiCaptureBuffer } from '../src/lib/race-lock';
+import { shouldCaptureConversation } from '../src/lib/active-capture-orchestrator';
+import { PLATFORM_ADAPTERS } from '../src/lib/platform-adapters';
 import type { SourceApp } from '../src/types/contracts';
 
 export default defineContentScript({
@@ -53,6 +55,8 @@ export default defineContentScript({
         }
         const candidate = await parseApiPayload(platform as SourceApp, url, payload);
         if (candidate) {
+          const adapter = PLATFORM_ADAPTERS[platform as SourceApp];
+          if (adapter && !await shouldCaptureConversation(adapter)) return;
           await submitApiCaptureBuffer(candidate);
         }
       } catch (err) {

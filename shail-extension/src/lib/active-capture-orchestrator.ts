@@ -8,7 +8,7 @@ import {
 import { sha256 } from './crypto';
 import { resolveConversationIdentity } from './conversation-id';
 import { scoreContent } from './importance';
-import { submitDomCaptureBuffer } from './race-lock';
+import { cancelDomCaptureBuffer, submitDomCaptureBuffer } from './race-lock';
 import type { CaptureResult, CaptureSegment } from '../types/contracts';
 import type { PlatformAdapter, StructuredMessage } from './platform-adapters';
 
@@ -85,6 +85,10 @@ export async function setConversationExcluded(adapter: PlatformAdapter, excluded
   const list = await readStringList(KEY_EXCLUDED_CHATS);
   const next = excluded ? [...list, fp] : list.filter(id => id !== fp);
   await writeStringList(KEY_EXCLUDED_CHATS, next);
+  if (excluded) {
+    const identity = await resolveConversationIdentity(location.href, adapter.sourceApp);
+    cancelDomCaptureBuffer(identity.conversationId);
+  }
   if (excluded) {
     const paused = await readStringList(KEY_PAUSED_CONVOS);
     await writeStringList(KEY_PAUSED_CONVOS, paused.filter(id => id !== fp));
