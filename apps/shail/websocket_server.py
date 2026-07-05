@@ -1,13 +1,8 @@
-"""
-WebSocket server for real-time LangGraph state synchronization
-
-Provides /ws/brain endpoint for Swift UI to receive real-time state updates.
-"""
-
 import asyncio
 import json
 import logging
 import os
+import time
 from typing import Dict, Set, Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -45,13 +40,10 @@ class BrainWebSocketManager:
     
     async def connect(self, websocket: WebSocket):
         """Accept a new WebSocket connection"""
-        import json
-        import time
-        
         # Log client information before accepting
         client_host = websocket.client.host if websocket.client else "unknown"
         client_port = websocket.client.port if websocket.client else "unknown"
-        logger.info(f"📡 WebSocket connection attempt from {client_host}:{client_port}")
+        logger.info(f"WebSocket connection attempt from {client_host}:{client_port}")
         
         # #region agent log
         safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"websocket_server.py:connect","message":"WebSocket connection attempt","data":{"client_host":client_host,"client_port":client_port},"timestamp":time.time()})
@@ -64,7 +56,7 @@ class BrainWebSocketManager:
             # Add to active connections
             self.active_connections.add(websocket)
             
-            logger.info(f"🔌 WebSocket client connected from {client_host}:{client_port}. Total: {len(self.active_connections)}")
+            logger.info(f"WebSocket client connected from {client_host}:{client_port}. Total: {len(self.active_connections)}")
             
             # #region agent log
             safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"websocket_server.py:connect","message":"WebSocket client connected","data":{"total_connections":len(self.active_connections),"client_host":client_host,"client_port":client_port},"timestamp":time.time()})
@@ -79,7 +71,7 @@ class BrainWebSocketManager:
                 
         except Exception as e:
             # Log handshake failure
-            logger.error(f"❌ WebSocket handshake failed for {client_host}:{client_port}: {e}", exc_info=True)
+            logger.error(f"WebSocket handshake failed for {client_host}:{client_port}: {e}", exc_info=True)
             
             # #region agent log
             safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"websocket_server.py:connect","message":"WebSocket handshake failed","data":{"client_host":client_host,"client_port":client_port,"error":str(e)},"timestamp":time.time()})
@@ -91,7 +83,7 @@ class BrainWebSocketManager:
     def disconnect(self, websocket: WebSocket):
         """Remove a disconnected WebSocket"""
         self.active_connections.discard(websocket)
-        logger.info(f"🔌 WebSocket client disconnected. Total: {len(self.active_connections)}")
+        logger.info(f"WebSocket client disconnected. Total: {len(self.active_connections)}")
     
     async def broadcast_state(self, state: Dict[str, Any]):
         """
@@ -106,7 +98,6 @@ class BrainWebSocketManager:
             self.state_history.pop(0)
         
         # Prepare message
-        import time
         message = {
             "type": "state_update",
             "timestamp": time.time(),
@@ -134,8 +125,6 @@ class BrainWebSocketManager:
             event_type: Type of event (e.g., "node_started", "node_completed", "error")
             data: Event data
         """
-        import time
-        import json
         # #region agent log
         safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"C","location":"websocket_server.py:broadcast_event","message":"Broadcasting event","data":{"event_type":event_type,"connections":len(self.active_connections)},"timestamp":time.time()})
         # #endregion
@@ -182,7 +171,6 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     try:
         # #region agent log
-        import time
         safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"websocket_server.py:websocket_endpoint","message":"WebSocket endpoint called","data":{},"timestamp":time.time()})
         # #endregion
         logger.info("WebSocket connection attempt received")
@@ -221,17 +209,16 @@ async def websocket_endpoint(websocket: WebSocket):
         websocket_manager.disconnect(websocket)
         logger.info("Client disconnected")
         # #region agent log
-        import time
         safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"websocket_server.py:websocket_endpoint","message":"WebSocket disconnected","data":{},"timestamp":time.time()})
         # #endregion
     except Exception as e:
         logger.error(f"WebSocket error: {e}", exc_info=True)
         # #region agent log
-        import time
         safe_log_write({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"websocket_server.py:websocket_endpoint","message":"WebSocket error","data":{"error":str(e)},"timestamp":time.time()})
         # #endregion
         try:
             websocket_manager.disconnect(websocket)
         except:
             pass
+
 

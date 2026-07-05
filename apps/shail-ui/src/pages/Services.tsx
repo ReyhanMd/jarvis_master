@@ -207,6 +207,13 @@ export function Services() {
           const status: ServiceInfo['status'] = liveStatus[key] ?? info?.status ?? 'stopped';
           const meta = SERVICE_META[key] ?? { label: key, description: '' };
           const canRestart = key !== 'backend' && status !== 'not_installed';
+          const queue = data?.blueprint_queue;
+          const ollamaDetail = key === 'ollama'
+            ? [
+                queue ? `blueprint queue ${queue.pending} pending / ${queue.running} running` : null,
+                info?.managed_owner ? `owner ${info.managed_owner}` : null,
+              ].filter(Boolean).join(' · ')
+            : '';
           return (
             <div
               key={key}
@@ -220,6 +227,9 @@ export function Services() {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: '#ccc' }}>{meta.label}</div>
                 <div style={{ fontSize: 11, color: '#2f2f2f', marginTop: 1 }}>{meta.description}</div>
+                {ollamaDetail && (
+                  <div style={{ fontSize: 10, color: '#444', marginTop: 4 }}>{ollamaDetail}</div>
+                )}
               </div>
               <StatusBadge status={status} />
               {key === 'ollama' && status === 'not_installed' && (

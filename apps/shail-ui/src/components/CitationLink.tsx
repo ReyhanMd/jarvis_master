@@ -7,6 +7,7 @@
  *   {{cite:chat:<message_id>}}
  *   {{cite:web:<index>}}                       (1-based; resolves via web list)
  *   {{cite:mcp:<provider>:<id>}}
+ *   {{cite:local_file:<path_index_id>}}
  *
  * The renderer runs over the assistant message text, replacing every match
  * with a small <CitationLink>. Unknown / unresolved tokens are dropped from
@@ -31,6 +32,7 @@ const SOURCE_LABEL: Record<string, string> = {
   notion: 'Notion',
   github: 'GitHub',
   gmail:  'Gmail',
+  local_file: 'Local file',
 };
 
 const SOURCE_COLOR: Record<string, string> = {
@@ -41,6 +43,7 @@ const SOURCE_COLOR: Record<string, string> = {
   notion: '#ffffff',
   github: '#c9d1d9',
   gmail:  '#ea4335',
+  local_file: '#7aa6e0',
 };
 
 export function CitationLink({ citation }: Props) {
@@ -61,6 +64,10 @@ export function CitationLink({ citation }: Props) {
     } else if (citation.type === 'mcp') {
       if (citation.url) window.open(citation.url, '_blank', 'noreferrer');
       else navigate(`/connections?source=${citation.provider}&doc=${citation.id}`);
+    } else if (citation.type === 'local_file') {
+      fetch(`http://localhost:8000/path-index/open?path=${encodeURIComponent(citation.path)}`, {
+        method: 'POST',
+      }).catch(() => {});
     }
   };
 
@@ -133,6 +140,14 @@ function describe(c: StoredCitation): { kind: string; label: string; title: stri
   if (c.type === 'web') {
     return { kind: 'web', label: SOURCE_LABEL.web, title: c.title, snippet: c.snippet || c.url };
   }
+  if (c.type === 'local_file') {
+    return {
+      kind: 'local_file',
+      label: SOURCE_LABEL.local_file,
+      title: c.title,
+      snippet: c.snippet || c.path,
+    };
+  }
   // mcp
   return {
     kind: c.provider,
@@ -145,7 +160,7 @@ function describe(c: StoredCitation): { kind: string; label: string; title: stri
 
 // ── Token-string renderer ────────────────────────────────────────────────────
 
-const TOKEN_RE = /\{\{cite:(memory|chat|web|mcp):([^\}]+)\}\}/g;
+const TOKEN_RE = /\{\{cite:(memory|chat|web|mcp|local_file):([^\}]+)\}\}/g;
 
 /**
  * Render an assistant message string, replacing every citation token with a
@@ -163,11 +178,13 @@ export function renderWithCitations(
   const chatById:  Map<string, StoredCitation> = new Map();
   const webByIdx:  Map<string, StoredCitation> = new Map();
   const mcpByKey:  Map<string, StoredCitation> = new Map(); // key: "provider:id"
+  const localFileById: Map<string, StoredCitation> = new Map();
   for (const c of citations) {
     if (c.type === 'memory') memById.set(c.id, c);
     else if (c.type === 'chat') chatById.set(c.id, c);
     else if (c.type === 'web') webByIdx.set(c.id, c);
     else if (c.type === 'mcp') mcpByKey.set(`${c.provider}:${c.id}`, c);
+    else if (c.type === 'local_file') localFileById.set(c.id, c);
   }
 
   const out: React.ReactNode[] = [];
@@ -190,6 +207,8 @@ export function renderWithCitations(
     else if (kind === 'mcp') {
       // payload is "<provider>:<id>"
       resolved = mcpByKey.get(payload);
+    } else if (kind === 'local_file') {
+      resolved = localFileById.get(payload);
     }
 
     if (resolved) {

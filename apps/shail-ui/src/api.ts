@@ -28,23 +28,23 @@ export const api = {
   search: (body: Record<string, unknown>) =>
     req<{ items: MemoryRecord[]; total: number }>('/browser/search', { method: 'POST', body: JSON.stringify(body) }),
   deleteMemory: (id: string) =>
-    req<{ ok: boolean }>(`/browser/memories/${id}`, { method: 'DELETE' }),
+    req<{ ok: boolean }>(`/browser/memories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   getMemory: (id: string) =>
-    req<MemoryRecord & { content?: string }>(`/browser/memories/${id}`),
+    req<MemoryRecord & { content?: string }>(`/browser/memories/${encodeURIComponent(id)}`),
   getRelatedMemories: (id: string, limit = 10) =>
-    req<MemoryRecord[]>(`/api/v2/memories/${id}/related?limit=${limit}`),
+    req<MemoryRecord[]>(`/api/v2/memories/${encodeURIComponent(id)}/related?limit=${limit}`),
   memoryGraph: () =>
     req<MemoryGraph>('/api/v2/graph'),
   getBlueprint: (id: string) =>
-    req<Blueprint>(`/browser/blueprint/${id}`),
+    req<Blueprint>(`/browser/blueprint/${encodeURIComponent(id)}`),
   getBlueprintIds: (ids: string[]) =>
     req<{ ids: string[] }>('/browser/blueprint-ids', { method: 'POST', body: JSON.stringify({ ids }) }),
   getArtifacts: (id: string) =>
-    req<{ items: CaptureArtifact[] }>(`/browser/memories/${id}/artifacts`),
+    req<{ items: CaptureArtifact[] }>(`/browser/memories/${encodeURIComponent(id)}/artifacts`),
   getMaterializations: (id: string) =>
-    req<{ items: MemoryMaterialization[] }>(`/browser/memories/${id}/materializations`),
+    req<{ items: MemoryMaterialization[] }>(`/browser/memories/${encodeURIComponent(id)}/materializations`),
   getCaptureHealth: (id: string) =>
-    req<CaptureHealth>(`/browser/memories/${id}/capture-health`),
+    req<CaptureHealth>(`/browser/memories/${encodeURIComponent(id)}/capture-health`),
   createReplayJob: (body: ReplayJobRequest) =>
     req<ReplayJobSummary>('/browser/replay/jobs', { method: 'POST', body: JSON.stringify(body) }),
   getReplayJob: (id: string) =>
@@ -95,10 +95,129 @@ export const api = {
   listChatSessions: () => req<{ items: ChatSessionSummary[] }>('/browser/chat/sessions'),
   createChatSession: () => req<ChatSessionSummary>('/browser/chat/sessions', { method: 'POST' }),
   getChatSession: (id: string) => req<ChatSessionDetail>(`/browser/chat/sessions/${id}`),
-  patchChatSession: (id: string, body: { title?: string; pinned?: boolean }) =>
+  patchChatSession: (
+    id: string,
+    body: {
+      title?: string;
+      pinned?: boolean;
+      capture_enabled?: boolean;
+      retention_policy?: 'keep_raw' | 'blueprint_only' | 'transcript_deleted';
+    },
+  ) =>
     req<ChatSessionSummary>(`/browser/chat/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteChatSession: (id: string) =>
     req<{ ok: boolean }>(`/browser/chat/sessions/${id}`, { method: 'DELETE' }),
+
+  // Phase C — session backfill, timeline, blueprint, redact
+  // Sprint 2: defaults to async (returns job_id immediately). Pass
+  // synchronous=true for legacy blocking call used by small-session paths.
+  backfillSession: (id: string, opts: { includeBlueprint?: boolean; synchronous?: boolean } = {}) =>
+    req<
+      | {
+          // Synchronous (legacy) response shape
+          session_id: string;
+          turns_seen: number;
+          turns_indexed: number;
+          turns_skipped: number;
+          blueprint_generated: boolean;
+          blueprint_memory_id: string | null;
+          raw_transcript_chars: number;
+          errors: string[];
+          duration_ms: number;
+          degraded_mode?: boolean;
+          degraded_reason?: string | null;
+          fts_fallback_used?: boolean;
+        }
+      | {
+          // Async (default) response shape
+          session_id: string;
+          job_id: string;
+          state: string;
+          accepted: boolean;
+        }
+    >(`/browser/chat/sessions/${id}/backfill`, {
+      method: 'POST',
+      body: JSON.stringify({
+        include_blueprint: opts.includeBlueprint ?? true,
+        synchronous: opts.synchronous ?? false,
+      }),
+    }),
+  // Sprint 2: poll backfill progress
+  getBackfillStatus: (id: string) =>
+    req<{
+      session_id: string;
+      state: 'idle' | 'running' | 'done' | 'failed' | 'degraded';
+      cursor: number;
+      total_messages: number;
+      progress_pct: number;
+      remaining: number;
+      job_id: string | null;
+      error: string | null;
+      backfilled_at: string | null;
+    }>(`/browser/chat/sessions/${id}/backfill/status`),
+  // Sprint 1: capture-pipeline health probe
+  getSessionHealth: (id: string) =>
+    req<{
+      session_id: string;
+      ollama_up: boolean;
+      embedder_error: string | null;
+      fts_available: boolean;
+      fts_indexed: number;
+      vector_indexed: number;
+      degraded_mode: boolean;
+    }>(`/browser/chat/sessions/${id}/health`),
+  // Sprint 4: import external chat export. `file` is a File from <input type=file>.
+  // We bypass the JSON `req` helper because FormData needs the browser-set
+  // multipart boundary in Content-Type — req's authHeaders() forces JSON.
+  importChats: async (
+    file: File,
+    source: 'chatgpt' | 'claude' | 'cursor',
+    autoBackfill = true,
+  ) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('source', source);
+    fd.append('auto_backfill', String(autoBackfill));
+    const key = localStorage.getItem('shail_api_key');
+    const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
+    const res = await fetch(`${BASE}/browser/chat/import`, {
+      method: 'POST', body: fd, headers,
+    });
+    if (res.status === 401) throw new Error('NOT_SIGNED_IN');
+    if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(t || `${res.status}`); }
+    return res.json() as Promise<{
+      source: string;
+      conversations_seen: number;
+      sessions_created: number;
+      messages_inserted: number;
+      session_ids: string[];
+      errors: string[];
+    }>;
+  },
+  getSessionTimeline: (id: string) =>
+    req<{
+      session: {
+        id: string;
+        title: string;
+        created_at: string;
+        updated_at: string;
+        pinned: boolean;
+        retention_policy: string;
+        capture_enabled: boolean;
+        blueprint_memory_id: string | null;
+        backfilled_at: string | null;
+      };
+      turns: Array<{ user_msg: any; asst_msg: any }>;
+      blueprint: any | null;
+      retention: { policy: string; raw_available: boolean };
+    }>(`/browser/chat/sessions/${id}/timeline`),
+  getSessionBlueprint: (id: string) =>
+    req<any>(`/browser/chat/sessions/${id}/blueprint`),
+  redactSession: (id: string) =>
+    req<{ ok: boolean; messages_deleted: number; blueprint_kept: string }>(
+      `/browser/chat/sessions/${id}/redact`,
+      { method: 'POST' },
+    ),
 
   // MCP connectors
   listMcpProviders: () => req<{ items: McpProvider[] }>('/mcp/providers'),
@@ -125,6 +244,58 @@ export const api = {
     req<{ ok: boolean; info: string }>('/browser/llm-settings/test', {
       method: 'POST', body: JSON.stringify(body),
     }),
+
+  // Local file path-index (Graphify map)
+  pathIndexStats: () =>
+    req<{ total: number; total_files: number; total_dirs: number; by_type: Record<string, number>; by_kind: Record<string, number>; embedded: number; last_indexed_at: number | null }>(
+      '/path-index/stats',
+    ),
+  pathIndexTree: (root?: string, depth = 2, maxNodes = 500) => {
+    const params = new URLSearchParams();
+    if (root) params.set('root', root);
+    params.set('depth', String(depth));
+    params.set('max_nodes', String(maxNodes));
+    return req<{ root: string | null; nodes: PathTreeNode[]; edges: { source: string; target: string }[]; truncated: boolean }>(
+      `/path-index/tree?${params.toString()}`,
+    );
+  },
+  pathIndexSync: () =>
+    req<{ status: string }>('/path-index/sync', { method: 'POST' }),
+  pathIndexEmbed: (path: string) =>
+    req<{ path: string; chunks_ingested: number; embedded: boolean; user_id: string }>(
+      `/path-index/embed?path=${encodeURIComponent(path)}`,
+      { method: 'POST' },
+    ),
+  pathIndexOpen: (path: string) =>
+    req<{ ok: boolean; path: string }>(
+      `/path-index/open?path=${encodeURIComponent(path)}`,
+      { method: 'POST' },
+    ),
+  pathIndexSearch: (q: string, limit = 20) =>
+    req<{ items: { id: string; path: string; file_type: string; size_bytes: number | null; mtime: number | null; title: string | null; indexed_at: number }[]; total: number }>(
+      `/path-index/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+
+  // Local files: explicit ingest + filesystem watcher
+  ingestLocalFiles: (paths: string[], maxFiles = 500) =>
+    req<{ ingested: number; skipped: number; files_seen: number; errors: string[] }>(
+      '/browser/chat/files/ingest',
+      { method: 'POST', body: JSON.stringify({ paths, max_files: maxFiles }) },
+    ),
+  startFolderWatch: (path: string) =>
+    req<{ ok: boolean; path?: string; status?: string; error?: string }>(
+      '/browser/chat/files/watch',
+      { method: 'POST', body: JSON.stringify({ path }) },
+    ),
+  stopFolderWatch: (path: string) =>
+    req<{ ok: boolean; path?: string; status?: string }>(
+      `/browser/chat/files/watch?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    ),
+  listFolderWatches: () =>
+    req<{ watches: { user_id: string; path: string; created_at: string; last_event_at: string | null; event_count: number }[] }>(
+      '/browser/chat/files/watch',
+    ),
 
   // Capture log
   captureLog: (limit = 100) =>
@@ -195,6 +366,14 @@ export interface AscentListResponse {
 // ── Chat types ─────────────────────────────────────────────────────────────
 export interface ChatMemoryCitation { id: string; title: string; score: number; }
 export interface ChatWebSource { title: string; url: string; snippet: string; }
+export interface ChatLocalFileCitation {
+  id: string;
+  title: string;
+  path: string;
+  snippet: string;
+  file_type: string;
+  score: number;
+}
 export interface ChatPastChatCitation {
   message_id: string;
   session_id: string;
@@ -212,6 +391,7 @@ export interface ChatResponse {
   memories: ChatMemoryCitation[];
   past_chats: ChatPastChatCitation[];
   web_sources: ChatWebSource[];
+  local_files?: ChatLocalFileCitation[];
   used_web: boolean;
 }
 
@@ -220,7 +400,19 @@ export type StoredCitation =
   | { type: 'memory'; id: string; title: string; score: number }
   | { type: 'chat'; id: string; session_id: string; title: string; snippet: string; score: number }
   | { type: 'web'; id: string; title: string; url: string; snippet: string }
-  | { type: 'mcp'; id: string; provider: string; title: string; snippet?: string; url?: string };
+  | { type: 'mcp'; id: string; provider: string; title: string; snippet?: string; url?: string }
+  | { type: 'local_file'; id: string; title: string; path: string; snippet?: string; file_type?: string; score?: number };
+
+export interface PathTreeNode {
+  id: string;          // absolute path
+  name: string;
+  is_dir: boolean;
+  kind: string | null; // 'code'|'doc'|'data'|'media'|'log'|'other'
+  size: number | null;
+  mtime: number | null;
+  child_count: number;
+  embedded: boolean;
+}
 
 export interface ChatSessionSummary {
   id: string;
@@ -411,6 +603,7 @@ export interface AltitudePoint {
   date: string;
   bytes: number;
   captures: number;
+  deletes?: number;
 }
 
 export interface AltitudeResponse {
@@ -462,11 +655,18 @@ export interface ServiceInfo {
   status: 'running' | 'stopped' | 'not_installed' | 'starting' | 'error' | 'unknown';
   port: number | null;
   pid: number | null;
+  managed_owner?: string | null;
 }
 
 export interface SystemStatus {
   services: Record<string, ServiceInfo>;
   tier: 'free' | 'pro';
+  blueprint_queue?: {
+    pending: number;
+    running: number;
+    done?: number;
+    failed?: number;
+  };
 }
 
 export interface CaptureSettings {

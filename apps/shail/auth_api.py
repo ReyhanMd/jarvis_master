@@ -4,23 +4,26 @@ SHAIL Auth API
 FastAPI router for user registration, login, and API key management.
 
 Endpoints (mounted at /auth):
-  POST /register   { email, password, name? }   → { user_id, api_key, email, name }
+  POST /register   { email, password, name? }   → 403 (registration disabled in single-user mode)
   POST /login      { email, password }           → { user_id, api_key, email, name }
   GET  /me         (Bearer required)             → { user_id, email, name, created_at }
   GET  /keys       (Bearer required)             → [{ key_prefix, label, created_at, last_used }]
   POST /keys       { label? }                    → { key, label }
   DELETE /keys/{key}                             → { ok: true }
 
-The `get_current_user` dependency is exported for use by other routers
-(browser_api, memory_dashboard_api, etc.).
+Single-User Mode:
+  SHAIL_ALLOW_REGISTRATION=false  → POST /register returns 403
+  SHAIL_CANONICAL_EMAIL set       → OAuth flows reject non-canonical accounts
+  get_user_or_local()             → raises 401 (no fallback to "local" ever)
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from apps.shail.limiter import limiter
 from pydantic import BaseModel, Field
 
 from apps.shail.auth_store import (
@@ -40,7 +43,27 @@ auth_router = APIRouter()
 _security = HTTPBearer(auto_error=False)
 
 
-# ── Auth dependency ────────────────────────────────────────────────────────────
+# ── Canonical user guard ───────────────────────────────────────────────────────
+
+def assert_canonical_email(email: str) -> None:
+    """
+    Reject any email that is not the canonical account.
+    Only active when SHAIL_CANONICAL_EMAIL is set in settings.
+    Call this in every OAuth and login handler that creates a session.
+    """
+    from apps.shail.settings import get_settings
+    canonical = get_settings().canonical_user_email
+    if canonical and email.lower().strip() != canonical.lower().strip():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"This SHAIL instance is restricted to {canonical}. "
+                "Sign in with the correct account."
+            ),
+        )
+
+
+# ── Auth dependencies ──────────────────────────────────────────────────────────
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_security),
@@ -48,9 +71,13 @@ async def get_current_user(
     """
     FastAPI dependency. Returns user_id string.
     Raises HTTP 401 if the bearer token is missing or invalid.
+    No fallback — authentication is always required.
     """
     if not credentials:
-        raise HTTPException(status_code=401, detail="Authorization required")
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Sign in at http://localhost:8000/dashboard",
+        )
     key = credentials.credentials
     user_id = get_user_by_api_key(key)
     if not user_id:
@@ -64,12 +91,18 @@ async def get_user_or_local(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_security),
 ) -> str:
     """
-    FastAPI dependency. Returns user_id when a valid Bearer token is present,
-    or the literal string "local" when no token is supplied.
-    Invalid tokens still raise 401 — this is for unauthenticated dev mode only.
+    SINGLE-USER MODE: This dependency no longer has an anonymous fallback.
+    Behaviour is now identical to get_current_user — raises 401 when
+    no valid token is present.
+
+    The function name is preserved for import compatibility only.
+    The 'or_local' path is permanently removed.
     """
     if not credentials:
-        return "local"
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Sign in at http://localhost:8000/dashboard",
+        )
     key = credentials.credentials
     user_id = get_user_by_api_key(key)
     if not user_id:
@@ -129,8 +162,23 @@ class RevokeResponse(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @auth_router.post("/register", response_model=AuthResponse, status_code=201)
-async def register(req: RegisterRequest) -> AuthResponse:
-    """Register a new account and return the first API key."""
+@limiter.limit("5/minute")
+async def register(request: Request, req: RegisterRequest) -> AuthResponse:
+    """
+    Register a new account.
+    DISABLED in single-user mode (SHAIL_ALLOW_REGISTRATION=false).
+    """
+    from apps.shail.settings import get_settings
+    if not get_settings().allow_registration:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Registration is disabled. This SHAIL instance is single-user. "
+                f"Sign in as {get_settings().canonical_user_email or 'the configured account'}."
+            ),
+        )
+    # Canonical email guard — even when registration is open, only allow the configured email
+    assert_canonical_email(req.email)
     try:
         user = create_user(email=req.email, password=req.password, name=req.name)
     except ValueError as exc:
@@ -146,8 +194,11 @@ async def register(req: RegisterRequest) -> AuthResponse:
 
 
 @auth_router.post("/login", response_model=AuthResponse)
-async def login(req: LoginRequest) -> AuthResponse:
+@limiter.limit("5/minute")
+async def login(request: Request, req: LoginRequest) -> AuthResponse:
     """Authenticate and return a new API key for this session."""
+    # Canonical email guard
+    assert_canonical_email(req.email)
     user = verify_password(req.email, req.password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -232,12 +283,11 @@ def _get_apple_jwks() -> list:
 
 
 @auth_router.post("/apple", response_model=AuthResponse)
-async def apple_sign_in(req: AppleSignInRequest) -> AuthResponse:
+@limiter.limit("5/minute")
+async def apple_sign_in(request: Request, req: AppleSignInRequest) -> AuthResponse:
     """
     Verify an Apple identity token (JWT signed by Apple) and return a SHAIL API key.
-
-    The audience is the Sign In With Apple "service ID" or bundle ID, supplied via
-    the APPLE_AUDIENCE env var (e.g. com.shail.ShailUI).
+    Canonical user guard: rejects non-canonical Apple accounts.
     """
     import os as _os
     try:
@@ -250,7 +300,6 @@ async def apple_sign_in(req: AppleSignInRequest) -> AuthResponse:
     if not audience:
         raise HTTPException(status_code=503, detail="APPLE_AUDIENCE env var not configured on backend")
 
-    # Decode unverified header to find kid
     try:
         header = _jwt.get_unverified_header(req.identity_token)
     except Exception as exc:
@@ -279,7 +328,10 @@ async def apple_sign_in(req: AppleSignInRequest) -> AuthResponse:
     if not sub:
         raise HTTPException(status_code=401, detail="Apple token has no sub claim")
 
-    # Use sub as a stable identifier; prefer existing user by email if available
+    # Canonical user guard — only the configured account may use Apple SSO
+    if email:
+        assert_canonical_email(email)
+
     name = req.full_name or claims.get("email", "Apple User")
     existing = get_user_by_email(email) if email else None
     if existing:
@@ -292,17 +344,21 @@ async def apple_sign_in(req: AppleSignInRequest) -> AuthResponse:
             name=existing["name"] or name,
         )
 
-    # New user — derive a placeholder password they cannot use directly
     import secrets as _secrets
     placeholder_pw = _secrets.token_urlsafe(32)
     try:
         user = create_user(email=email or f"apple_{sub}@privaterelay.appleid.com",
                             password=placeholder_pw, name=name)
     except ValueError:
-        # Race: created concurrently
-        user = get_user_by_email(email or f"apple_{sub}@privaterelay.appleid.com")
+        import asyncio as _asyncio
+        user = None
+        for _ in range(5):
+            user = get_user_by_email(email or f"apple_{sub}@privaterelay.appleid.com")
+            if user:
+                break
+            await _asyncio.sleep(0.1)
         if not user:
-            raise HTTPException(status_code=500, detail="Failed to create user")
+            raise HTTPException(status_code=500, detail="Failed to create or retrieve user")
 
     api_key = create_api_key(user["id"], label="Apple SSO")
     return AuthResponse(

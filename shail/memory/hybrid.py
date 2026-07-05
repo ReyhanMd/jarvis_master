@@ -127,7 +127,10 @@ async def hybrid_search(
         if cached is not None:
             logger.debug("hybrid_search: cache HIT for q=%r ns=%s", query[:40], namespace)
             try:
-                from apps.shail import telemetry
+                # Use module-level telemetry import (line 21). A redundant
+                # `from apps.shail import telemetry` here previously shadowed
+                # that import, making `telemetry` a function-local and triggering
+                # UnboundLocalError on every reference earlier in the function.
                 telemetry.incr(telemetry.RETRIEVAL_PATH, path="cache_hit")
             except Exception:
                 pass

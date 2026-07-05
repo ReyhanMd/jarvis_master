@@ -1,4 +1,5 @@
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -20,7 +21,7 @@ if PROJECT_ROOT not in sys.path:
 # Manually load shail module (works around macOS case-insensitivity issues)
 # This is needed because Python's import system has issues with case-insensitive filesystems
 shail_path = os.path.join(PROJECT_ROOT, "shail", "__init__.py")
-if os.path.exists(shail_path):
+if os.path.exists(shail_path) and "shail" not in sys.modules:
     try:
         spec = importlib.util.spec_from_file_location("shail", shail_path)
         if spec and spec.loader:
@@ -53,7 +54,7 @@ from apps.shail.browser_api import browser_router
 from apps.shail.ascents_api import ascents_router
 from apps.shail.chat_api import chat_router
 from apps.shail.mcp_api import mcp_router
-from apps.shail.auth_api import auth_router, get_user_or_local
+from apps.shail.auth_api import auth_router, get_current_user, get_user_or_local
 from apps.shail.auth_store import init_auth_db
 from apps.shail.memory_dashboard_api import dashboard_router
 from apps.shail.macos_memory_api import memory_router, path_idx_router
@@ -63,8 +64,7 @@ import uuid
 
 
 def ensure_log_dir():
-    """Ensure .cursor directory exists for debug logs"""
-    log_dir = os.path.join(os.path.expanduser("~"), "jarvis_master", ".cursor")
+    log_dir = os.path.join(PROJECT_ROOT, ".cursor")
     os.makedirs(log_dir, exist_ok=True)
     return os.path.join(log_dir, "debug.log")
 
@@ -93,7 +93,210 @@ class TaskQueuedResponse(BaseModel):
     message: str
 
 
-app = FastAPI(title="Shail Service", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- STARTUP ---
+    settings = get_settings()
+    os.makedirs(os.path.dirname(settings.sqlite_path), exist_ok=True)
+    try:
+        init_auth_db()
+        logger.info("Auth DB initialized")
+        try:
+            from apps.shail.crypto import run_migrations
+            run_migrations()
+            logger.info("Database GCM migrations complete")
+        except Exception as migration_exc:
+            logger.warning("Database GCM migrations failed: %s", migration_exc)
+    except Exception as exc:
+        logger.warning("Auth DB init failed: %s", exc)
+    try:
+        from apps.shail.blueprints import init_blueprint_db
+        init_blueprint_db()
+        logger.info("Blueprint DB initialized")
+    except Exception as exc:
+        logger.warning("Blueprint DB init failed: %s", exc)
+    try:
+        from apps.shail.capture_store import init_capture_store
+        init_capture_store()
+        logger.info("Capture store initialized")
+    except Exception as exc:
+        logger.warning("Capture store init failed: %s", exc)
+    try:
+        from apps.shail.session_backfill import ensure_phase_c_schema
+        ensure_phase_c_schema()
+        logger.info("Phase C session schema applied")
+    except Exception as exc:
+        logger.warning("Phase C schema apply failed: %s", exc)
+    try:
+        from apps.shail.raw_transcripts import init_raw_transcripts_schema
+        init_raw_transcripts_schema()
+        logger.info("Raw transcripts schema applied (segments columns)")
+    except Exception as exc:
+        logger.warning("Raw transcripts schema apply failed: %s", exc)
+    try:
+        from apps.shail.pipeline_status import init_pipeline_status_schema
+        init_pipeline_status_schema()
+        logger.info("Pipeline status schema applied")
+    except Exception as exc:
+        logger.warning("Pipeline status schema apply failed: %s", exc)
+    try:
+        register_all_tools(get_provider())
+        logger.info("MCP registration completed on startup")
+    except Exception as exc:
+        logger.warning("MCP registration failed: %s", exc)
+    # Runtime stabilization: register main event loop for thread-safe scheduling
+    try:
+        from shail.orchestration.graph import register_main_loop
+        register_main_loop(asyncio.get_event_loop())
+    except Exception as exc:
+        logger.warning("Main loop registration failed: %s", exc)
+    # Phase 6: init metrics + Sprint 2 telemetry→Prometheus bridge
+    try:
+        from shail.observability.metrics import init_metrics
+        init_metrics()
+        from shail.observability.bridge import install_bridge
+        install_bridge()
+    except Exception as exc:
+        logger.warning("Metrics init failed: %s", exc)
+    # Phase 3: start ingest queue drain worker
+    try:
+        from shail.memory.ingest_queue import get_ingest_queue
+        get_ingest_queue().start()
+    except Exception as exc:
+        logger.warning("IngestQueue start failed: %s", exc)
+
+    # Launch background async startup tasks
+    asyncio.create_task(_startup_index_run())
+    asyncio.create_task(_start_blueprint_queue_worker_run())
+    asyncio.create_task(_restart_filesystem_watchers_run())
+
+    yield
+
+    # --- SHUTDOWN ---
+    try:
+        from shail.memory.ingest_queue import get_ingest_queue
+        await get_ingest_queue().stop()
+    except Exception as exc:
+        logger.warning("IngestQueue stop failed: %s", exc)
+    try:
+        from shail.memory.supermemory_client import close_supermemory_client
+        await close_supermemory_client()
+    except Exception as exc:
+        logger.warning("SupermemoryClient close failed: %s", exc)
+    try:
+        from shail.integrations.local.filesystem.adapter import get_adapter
+        get_adapter().stop_all()
+    except Exception:
+        pass
+
+
+async def _startup_index_run():
+    await asyncio.sleep(6)
+    loop = asyncio.get_event_loop()
+    try:
+        from pathlib import Path
+        from shail.memory.path_index import (
+            scan, ingest_spotlight_recent, _default_roots, backfill_snippets,
+            get_persisted_roots,
+        )
+        from shail.integrations.local.filesystem.adapter import get_adapter
+        from apps.shail.auth_store import _conn as _auth_conn
+
+        settings = get_settings()
+        default_roots = _default_roots()
+        env_roots = [r for r in settings.scan_roots if r and Path(r).is_dir()]
+        persisted_roots = []
+        try:
+            persisted_roots = get_persisted_roots(settings.path_index_db)
+        except Exception:
+            pass
+        # Merge all sources, deduplicate, preserve order.
+        seen: set = set()
+        roots: list = []
+        for r in env_roots + persisted_roots + default_roots:
+            if r not in seen:
+                seen.add(r)
+                roots.append(r)
+        logger.info(
+            "Scan roots: %d env, %d persisted, %d default → %d total: %s",
+            len(env_roots), len(persisted_roots), len(default_roots), len(roots), roots,
+        )
+
+        # 1. Bulk scan in thread
+        file_count = await loop.run_in_executor(
+            None, lambda: scan(settings.path_index_db, roots=roots or None)
+        )
+        logger.info("Startup path index walk complete: %d new/changed files", file_count)
+
+        # 1b. Backfill summary_snippet
+        try:
+            sn = await loop.run_in_executor(
+                None, lambda: backfill_snippets(settings.path_index_db, max_files=2000)
+            )
+            if sn:
+                logger.info("Backfilled summary_snippet for %d existing rows", sn)
+        except Exception as exc:
+            logger.debug("snippet backfill skipped: %s", exc)
+
+        # 2. Spotlight (macOS)
+        try:
+            sl = await loop.run_in_executor(
+                None, lambda: ingest_spotlight_recent(settings.path_index_db, days=30, max_files=1000)
+            )
+            if sl:
+                logger.info("Spotlight added %d recently-modified files", sl)
+        except Exception as exc:
+            logger.debug("Spotlight ingest skipped: %s", exc)
+
+        # 3. Auto-attach watchdog observers
+        try:
+            with _auth_conn() as con:
+                row = con.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
+            resident_user = row["id"] if row else None
+        except Exception:
+            resident_user = None
+        if resident_user:
+            adapter = get_adapter()
+            attached = 0
+            for r in roots:
+                res = await loop.run_in_executor(None, lambda root=r: adapter.start_watch(resident_user, root))
+                if res.get("ok"):
+                    attached += 1
+            logger.info("Auto-attached %d watchdog observers for user=%s", attached, resident_user)
+        else:
+            logger.info("No registered user — skipping auto-watch attach")
+    except Exception as e:
+        logger.warning("Startup index failed: %s", e)
+
+
+async def _start_blueprint_queue_worker_run():
+    await asyncio.sleep(4)
+    try:
+        from apps.shail.blueprint_queue import start_worker
+        start_worker()
+    except Exception as e:
+        logger.warning("blueprint queue worker failed to start: %s", e)
+
+
+async def _restart_filesystem_watchers_run():
+    await asyncio.sleep(3)
+    try:
+        from shail.integrations.local.filesystem.adapter import get_adapter
+        count = get_adapter().restart_persisted_watches()
+        if count:
+            logger.info("Restarted %d filesystem watcher(s) from persisted state", count)
+    except Exception as e:
+        logger.warning("Filesystem watcher restart failed: %s", e)
+
+
+app = FastAPI(title="Shail Service", version="0.1.0", lifespan=lifespan)
+
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from apps.shail.limiter import limiter
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS: pinned to known origins. allow_origins=["*"] paired with
 # allow_credentials=True is a CORS spec violation that some browsers reject.
@@ -146,83 +349,32 @@ if os.path.isdir(_UI_DIST):
     @app.get("/dashboard", include_in_schema=False)
     @app.get("/dashboard/{full_path:path}", include_in_schema=False)
     async def serve_dashboard_spa(full_path: str = ""):
-        candidate = _Path(_UI_DIST) / full_path
+        base_dir = _Path(_UI_DIST).resolve()
+        try:
+            candidate = (base_dir / full_path).resolve()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid path")
+
+        if not candidate.is_relative_to(base_dir):
+            raise HTTPException(status_code=403, detail="Access denied")
+
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(_Path(_UI_DIST) / "index.html")
+        return FileResponse(base_dir / "index.html")
 
 router = ShailCoreRouter()
 logger = logging.getLogger(__name__)
 
 
-@app.on_event("startup")
-def bootstrap_mcp():
-    """Register all tools with MCP on service startup."""
-    settings = get_settings()
-    os.makedirs(os.path.dirname(settings.sqlite_path), exist_ok=True)
-    try:
-        init_auth_db()
-        logger.info("Auth DB initialized")
-    except Exception as exc:
-        logger.warning("Auth DB init failed: %s", exc)
-    try:
-        from apps.shail.blueprints import init_blueprint_db
-        init_blueprint_db()
-        logger.info("Blueprint DB initialized")
-    except Exception as exc:
-        logger.warning("Blueprint DB init failed: %s", exc)
-    try:
-        from apps.shail.capture_store import init_capture_store
-        init_capture_store()
-        logger.info("Capture store initialized")
-    except Exception as exc:
-        logger.warning("Capture store init failed: %s", exc)
-    try:
-        register_all_tools(get_provider())
-        logger.info("MCP registration completed on startup")
-    except Exception as exc:
-        logger.warning("MCP registration failed: %s", exc)
-    # Runtime stabilization: register main event loop for thread-safe scheduling
-    try:
-        import asyncio
-        from shail.orchestration.graph import register_main_loop
-        register_main_loop(asyncio.get_event_loop())
-    except Exception as exc:
-        logger.warning("Main loop registration failed: %s", exc)
-    # Phase 6: init metrics + Sprint 2 telemetry→Prometheus bridge
-    try:
-        from shail.observability.metrics import init_metrics
-        init_metrics()
-        from shail.observability.bridge import install_bridge
-        install_bridge()
-    except Exception as exc:
-        logger.warning("Metrics init failed: %s", exc)
-    # Phase 3: start ingest queue drain worker
-    try:
-        from shail.memory.ingest_queue import get_ingest_queue
-        get_ingest_queue().start()
-    except Exception as exc:
-        logger.warning("IngestQueue start failed: %s", exc)
 
-
-@app.on_event("shutdown")
-async def _runtime_shutdown():
-    """Graceful shutdown — drain queues, close HTTP pools."""
-    try:
-        from shail.memory.ingest_queue import get_ingest_queue
-        await get_ingest_queue().stop()
-    except Exception as exc:
-        logger.warning("IngestQueue stop failed: %s", exc)
-    try:
-        from shail.memory.supermemory_client import close_supermemory_client
-        await close_supermemory_client()
-    except Exception as exc:
-        logger.warning("SupermemoryClient close failed: %s", exc)
 
 
 @app.get("/metrics", include_in_schema=False)
-def prometheus_metrics():
+def prometheus_metrics(request: Request):
     """Prometheus metrics endpoint (Phase 6)."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Access denied")
     try:
         from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
         from fastapi.responses import Response
@@ -236,7 +388,7 @@ def prometheus_metrics():
 
 
 @app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
+async def health() -> HealthResponse:
     errors: List[str] = []
     chroma_ready = False
     embedder_ready = False
@@ -252,18 +404,13 @@ def health() -> HealthResponse:
         errors.append(f"chroma: {exc}")
 
     try:
-        from shail.memory.embeddings import embed_query
-        vec = embed_query("ping")
-        embedder_ready = bool(vec)
-    except Exception as exc:
-        errors.append(f"embedder: {exc}")
-
-    try:
-        import httpx
         host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-        with httpx.Client(timeout=2.0) as c:
-            r = c.get(f"{host}/api/tags")
+        async with httpx.AsyncClient(timeout=0.5) as c:
+            r = await c.get(f"{host}/api/tags")
             ollama_reachable = r.status_code == 200
+            # If Ollama is up, treat embedder as ready without a live ping
+            # (embed_query("ping") on every /health call blocks for ~1s).
+            embedder_ready = ollama_reachable
     except Exception as exc:
         errors.append(f"ollama: {exc}")
 
@@ -290,35 +437,18 @@ async def websocket_brain(websocket: WebSocket):
     Clients connect to receive state updates as the planner executes tasks.
     """
     try:
-        # #region agent log
-        import json
-        import time
-        try:
-            log_path = ensure_log_dir()
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"main.py:websocket_brain","message":"WebSocket route called","data":{},"timestamp":time.time()})+'\n')
-        except Exception:
-            pass  # Don't fail WebSocket if logging fails
-        # #endregion
         logger.info("WebSocket /ws/brain endpoint called")
         await websocket_endpoint(websocket)
     except Exception as e:
-        # #region agent log
-        import json
-        import time
-        try:
-            log_path = ensure_log_dir()
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"test-permission-ws","hypothesisId":"A","location":"main.py:websocket_brain","message":"WebSocket route error","data":{"error":str(e)},"timestamp":time.time()})+'\n')
-        except Exception:
-            pass  # Don't fail WebSocket if logging fails
-        # #endregion
         logger.error(f"WebSocket route error: {e}", exc_info=True)
         raise
 
 
 @app.post("/tasks", response_model=TaskQueuedResponse, status_code=202)
-def submit_task(req: TaskRequest) -> TaskQueuedResponse:
+def submit_task(
+    req: TaskRequest,
+    user_id: str = Depends(get_current_user),
+) -> TaskQueuedResponse:
     """
     Submit a new task for asynchronous execution.
     
@@ -327,34 +457,12 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
     
     Use GET /tasks/{task_id} to check status.
     """
-    # #region agent log
-    import json
-    import time
-    import sys
-    log_entry = {"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"main.py:submit_task","message":"Task submission received","data":{"text":req.text[:50],"desktop_id":req.desktop_id},"timestamp":time.time()}
-    print(f"🔍 [DEBUG] Task submission received: desktop_id={req.desktop_id}", file=sys.stderr)
-    try:
-        log_path = ensure_log_dir()
-        with open(log_path, 'a') as f:
-            f.write(json.dumps(log_entry)+'\n')
-            f.flush()
-    except Exception as e:
-        print(f"🔍 [DEBUG] Failed to write log: {e}", file=sys.stderr)
-    # #endregion
     try:
         # Generate task ID — full UUID4 to avoid birthday collisions on
         # shared-context namespaces (Phase 5).
         task_id = str(uuid.uuid4())
         
         req_dict = req.dict()
-        # #region agent log
-        try:
-            log_path = ensure_log_dir()
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"main.py:submit_task","message":"Request dict created","data":{"desktop_id_in_dict":req_dict.get("desktop_id")},"timestamp":time.time()})+'\n')
-        except Exception:
-            pass  # Don't fail task submission if logging fails
-        # #endregion
         
         # Store task in database
         try:
@@ -363,7 +471,7 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
             logger.error(f"Failed to create task in database: {e}", exc_info=True)
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to store task: {str(e)}"
+                detail="Failed to store task."
             )
         
         # Queue task for worker processing
@@ -373,19 +481,7 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
         except (ConnectionError, ImportError, RuntimeError, Exception) as e:
             # Redis not available - log warning but don't fail
             # Task is still stored in database, worker can poll database instead
-            error_msg = str(e)
-            error_msg = str(e)
             logger.warning(f"Redis queue unavailable: {e}. Task {task_id} stored in database only.")
-            # #region agent log
-            try:
-                import json
-                import time
-                log_path = ensure_log_dir()
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"test-desktop-id","hypothesisId":"G","location":"main.py:submit_task","message":"Redis unavailable, task stored in DB only","data":{"task_id":task_id,"error":error_msg},"timestamp":time.time()})+'\n')
-            except Exception:
-                pass  # Don't fail if logging fails
-            # #endregion
             # Still return success - task is in database, worker can poll
             # Don't fail the request if Redis is down
         
@@ -400,12 +496,16 @@ def submit_task(req: TaskRequest) -> TaskQueuedResponse:
         logger.error(f"Task submission error: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Task submission failed: {str(e)}"
+            detail="Task submission failed."
         )
 
 
 @app.get("/tasks/all")
-def get_all_tasks_endpoint(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+def get_all_tasks_endpoint(
+    limit: int = 100,
+    offset: int = 0,
+    user_id: str = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
     """
     Get all tasks from the database.
     
@@ -435,11 +535,14 @@ def get_all_tasks_endpoint(limit: int = 100, offset: int = 0) -> List[Dict[str, 
         
         return enriched_tasks
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to retrieve tasks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve tasks")
 
 
 @app.get("/tasks/awaiting-approval")
-def get_tasks_awaiting_approval() -> List[Dict[str, Any]]:
+def get_tasks_awaiting_approval(
+    user_id: str = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
     """
     Return tasks that are awaiting approval.
     """
@@ -451,10 +554,14 @@ def get_tasks_awaiting_approval() -> List[Dict[str, Any]]:
                 awaiting.append(task)
         return awaiting
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to retrieve tasks awaiting approval: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve tasks awaiting approval")
 
 @app.get("/tasks/{task_id}", response_model=TaskResult)
-def get_task_status(task_id: str) -> TaskResult:
+def get_task_status(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+) -> TaskResult:
     """
     Get the current status of a task from the task store.
     
@@ -516,11 +623,15 @@ def get_task_status(task_id: str) -> TaskResult:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to retrieve task status for {task_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve task status")
 
 
 @app.get("/tasks/{task_id}/results")
-def get_task_results(task_id: str) -> Dict[str, Any]:
+def get_task_results(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
     """
     Return detailed task results (raw stored payload).
     """
@@ -539,10 +650,14 @@ def get_task_results(task_id: str) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to retrieve task results for {task_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve task results")
 
 @app.post("/tasks/{task_id}/approve", response_model=ApprovalResponse)
-def approve_task(task_id: str) -> ApprovalResponse:
+def approve_task(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+) -> ApprovalResponse:
     """
     Approve a pending permission request for a task.
     
@@ -567,11 +682,15 @@ def approve_task(task_id: str) -> ApprovalResponse:
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to approve task {task_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to approve task")
 
 
 @app.post("/tasks/{task_id}/deny", response_model=ApprovalResponse)
-def deny_task(task_id: str) -> ApprovalResponse:
+def deny_task(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+) -> ApprovalResponse:
     """
     Deny a pending permission request for a task.
     """
@@ -586,11 +705,15 @@ def deny_task(task_id: str) -> ApprovalResponse:
             task_id=task_id
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to deny task {task_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to deny task")
 
 
 @app.post("/permissions/bulk-approve")
-async def bulk_approve_permissions(categories: List[str]):
+async def bulk_approve_permissions(
+    categories: List[str],
+    user_id: str = Depends(get_current_user),
+):
     """
     Approve multiple permission categories at once.
     
@@ -615,7 +738,8 @@ async def bulk_approve_permissions(categories: List[str]):
             "message": f"Approved {len(approved)} categories"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed bulk permission approval: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed bulk permission approval")
 
 
 @app.get("/permissions/categories")
@@ -629,29 +753,30 @@ async def get_permission_categories():
         from shail.safety.bulk_permissions import get_permission_summary
         return get_permission_summary()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to retrieve permission categories: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve permission categories")
 
 
 @app.get("/chat/history", response_model=List[Dict[str, Any]])
-async def chat_history(limit: int = 200):
+async def chat_history(
+    limit: int = 200,
+    user_id: str = Depends(get_current_user),
+):
     """
     Return chat history from the local store.
     """
     try:
         return get_chat_history(limit=limit)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"History error: {str(e)}")
+        logger.error(f"History retrieval error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve history")
 
 
 
-async def rag_retrieve(query: str, user_id: str = "local") -> str:
+async def rag_retrieve(query: str, user_id: str) -> str:
     """Retrieve context from all memory tiers for a query, scoped to a user.
 
-    Sprint 1 fix: previously queried `shail_important` and `shail_ephemeral`
-    as separate Chroma collections — but every writer (browser_api,
-    macos_memory_api, _ingest_unified) writes to the single base collection
-    via _get_store() with `tier` as a metadata field. The old code therefore
-    queried empty collections and Gemma never saw any captured memory.
+    Always uses the canonical user namespace — no "local" fallback.
     """
     try:
         from shail.memory.rag import _get_store
@@ -663,7 +788,8 @@ async def rag_retrieve(query: str, user_id: str = "local") -> str:
         results: list = []
 
         store = _get_store()
-        namespace = f"user_{user_id}" if user_id and user_id != "local" else "local"
+        # Always scoped to the authenticated user — no anonymous namespace
+        namespace = f"user_{user_id}"
 
         for tier in ("important", "ephemeral"):
             try:
@@ -703,59 +829,62 @@ class WebSource(BaseModel):
     snippet: str = ""
 
 
+class LocalFileSource(BaseModel):
+    """Local-file citation surfaced to the desktop client.
+
+    Same shape as chat_api.LocalFileCitation but minted here so the macOS
+    desktop can render Finder-reveal buttons without importing the chat
+    module's pydantic class.
+    """
+    id: str
+    title: str
+    path: str
+    snippet: str = ""
+    file_type: str = ""
+    score: float = 0.0
+
+
 class QueryResponse(BaseModel):
     answer: str
     text: str = ""       # backward-compat: old ChatService decodes .text
     tier_used: str
     model: str = "gemma3:4b-it-q4_K_M"
     sources: List[WebSource] = Field(default_factory=list)
+    local_files: List[LocalFileSource] = Field(default_factory=list)
     used_web: bool = False
 
 
 @app.post("/query", response_model=QueryResponse)
 async def unified_query(
     req: QueryRequest,
-    user_id: str = Depends(get_user_or_local),
+    user_id: str = Depends(get_current_user),
 ) -> QueryResponse:
     """
-    Unified query: classify intent, run RAG + (optionally) web search in parallel,
-    inject combined context into Gemma. Web search hard-capped at 3 s.
+    Unified query: routes through the SAME pipeline as /browser/chat so the
+    macOS desktop (which still POSTs here) gets identical retrieval, context
+    packet, MCP integration, formatting prompt, and citation contract as the
+    web dashboard. Previously this used a simpler `rag_retrieve()` + a bare
+    system prompt — so the desktop produced visibly different (worse) answers
+    than the dashboard for the same query.
     """
-    from apps.shail.web_search import needs_web_search, search as web_search, format_for_prompt
+    from apps.shail.chat_api import _build_context, _system_prompt as _chat_system_prompt
+    from apps.shail.web_search import format_for_prompt
 
     slot = classify(req.text)
 
-    # Run RAG and web search concurrently — overlap latency
-    needs_rag = slot in ("memory.search", "nav.assist", "gemma.chat")
-    needs_web = needs_web_search(req.text)
-
-    rag_task = rag_retrieve(req.text, user_id=user_id) if needs_rag else None
-    web_task = web_search(req.text, max_results=3, timeout=3.0) if needs_web else None
-
-    rag_context = ""
-    web_results: list = []
-
-    if rag_task and web_task:
-        rag_context, web_results = await asyncio.gather(rag_task, web_task)
-    elif rag_task:
-        rag_context = await rag_task
-    elif web_task:
-        web_results = await web_task
-
-    # Build combined context
-    parts = []
-    if rag_context:
-        parts.append(rag_context)
-    if web_results:
-        parts.append(format_for_prompt(web_results))
-    context = "\n\n---\n\n".join(parts)
+    # Full retrieval: memories (hybrid) + past chats + MCP live + MCP RAG + web
+    # + local files (pointer-only, content read at answer time).
+    context, _citations, _past, web_sources, _mcp, local_files = await _build_context(
+        user_id, req.text, is_first_in_session=not bool(req.history),
+        task_id=None,
+    )
 
     messages = req.history + [{"role": "user", "content": req.text}]
     answer, meta = await call_llm(
         messages=messages,
         user_id=user_id,
         context=context,
-        system_prompt="You are SHAIL, a personal AI assistant running locally.",
+        system_prompt=_chat_system_prompt(),
     )
 
     try:
@@ -764,7 +893,15 @@ async def unified_query(
     except Exception:
         pass
 
-    sources = [WebSource(**r) for r in web_results] if web_results else []
+    # Legacy WebSource shape for backward-compat with the Swift desktop client.
+    sources = [WebSource(title=w.title, url=w.url, snippet=w.snippet) for w in web_sources] if web_sources else []
+    local_file_sources = [
+        LocalFileSource(
+            id=f.id, title=f.title, path=f.path, snippet=f.snippet,
+            file_type=f.file_type, score=f.score,
+        )
+        for f in (local_files or [])
+    ]
 
     return QueryResponse(
         answer=answer,
@@ -772,21 +909,25 @@ async def unified_query(
         tier_used=slot,
         model=meta.get("model", get_settings().ollama_chat_model),
         sources=sources,
-        used_web=bool(web_results),
+        local_files=local_file_sources,
+        used_web=bool(web_sources),
     )
 
 
 @app.post("/chat", response_model=QueryResponse)
 async def chat_compat(
     req: QueryRequest,
-    user_id: str = Depends(get_user_or_local),
+    user_id: str = Depends(get_current_user),
 ) -> QueryResponse:
     """/chat kept for backward-compat — delegates to /query."""
     return await unified_query(req, user_id=user_id)
 
 
 @app.post("/query/stream")
-async def stream_query(req: QueryRequest) -> StreamingResponse:
+async def stream_query(
+    req: QueryRequest,
+    user_id: str = Depends(get_current_user),
+) -> StreamingResponse:
     """
     Streaming SSE version of /query — token streaming + parallel web search.
 
@@ -796,42 +937,33 @@ async def stream_query(req: QueryRequest) -> StreamingResponse:
       data: {"done": true, "answer": "...", "sources":[]} — final
       data: {"error": "..."}                              — backend error
     """
-    from apps.shail.web_search import needs_web_search, search as web_search, format_for_prompt
+    # Route through the full chat_api pipeline so desktop streaming gets the
+    # same retrieval (hybrid + past chats + MCP) and the same formatting prompt.
+    from apps.shail.chat_api import _build_context, _system_prompt as _chat_system_prompt
 
     s = get_settings()
     slot = classify(req.text)
-    needs_rag = slot in ("memory.search", "nav.assist", "gemma.chat")
-    needs_web = needs_web_search(req.text)
 
-    # Run RAG + web search concurrently BEFORE streaming starts
-    rag_task = rag_retrieve(req.text) if needs_rag else None
-    web_task = web_search(req.text, max_results=3, timeout=3.0) if needs_web else None
+    context, _citations, _past, web_sources, _mcp, local_files = await _build_context(
+        user_id, req.text, is_first_in_session=not bool(req.history),
+        task_id=None,
+    )
+    web_results = [{"title": w.title, "url": w.url, "snippet": w.snippet} for w in (web_sources or [])]
+    local_file_payload = [
+        {"id": f.id, "title": f.title, "path": f.path, "snippet": f.snippet,
+         "file_type": f.file_type, "score": f.score}
+        for f in (local_files or [])
+    ]
 
-    rag_context = ""
-    web_results: list = []
-    if rag_task and web_task:
-        rag_context, web_results = await asyncio.gather(rag_task, web_task)
-    elif rag_task:
-        rag_context = await rag_task
-    elif web_task:
-        web_results = await web_task
-
-    parts = []
-    if rag_context:
-        parts.append(rag_context)
-    if web_results:
-        parts.append(format_for_prompt(web_results))
-    context = "\n\n---\n\n".join(parts)
-
-    system_content = "You are SHAIL, a personal AI assistant running locally."
-    if context:
-        system_content += f"\n\nRelevant context:\n{context}"
+    sys_base = _chat_system_prompt()
+    system_content = sys_base + (f"\n\nRelevant context:\n{context}" if context else "")
 
     messages = req.history + [{"role": "user", "content": req.text}]
     payload = {
         "model": s.ollama_chat_model,
         "messages": [{"role": "system", "content": system_content}] + messages,
         "stream": True,
+        "options": {"num_ctx": s.ollama_num_ctx, "num_thread": s.ollama_num_thread, "num_gpu": 99},
     }
 
     async def event_stream() -> AsyncIterator[str]:
@@ -839,6 +971,8 @@ async def stream_query(req: QueryRequest) -> StreamingResponse:
         # Emit sources upfront so UI can render link icons early
         if web_results:
             yield f"data: {json.dumps({'sources': web_results})}\n\n"
+        if local_file_payload:
+            yield f"data: {json.dumps({'local_files': local_file_payload})}\n\n"
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 async with client.stream(
@@ -856,7 +990,7 @@ async def stream_query(req: QueryRequest) -> StreamingResponse:
                             full_answer += token
                             yield f"data: {json.dumps({'token': token})}\n\n"
                         if chunk.get("done"):
-                            yield f"data: {json.dumps({'done': True, 'answer': full_answer, 'sources': web_results})}\n\n"
+                            yield f"data: {json.dumps({'done': True, 'answer': full_answer, 'sources': web_results, 'local_files': local_file_payload})}\n\n"
                             break
         except httpx.ConnectError:
             yield f"data: {json.dumps({'error': 'ollama_offline', 'message': 'Ollama is not running'})}\n\n"
@@ -880,22 +1014,11 @@ async def stream_query(req: QueryRequest) -> StreamingResponse:
     )
 
 
-# ── Startup indexing ──────────────────────────────────────────────────────────
 
-@app.on_event("startup")
-async def _startup_index():
-    async def _run():
-        await asyncio.sleep(6)
-        try:
-            from shail.memory.path_index import scan
-            count = scan(get_settings().path_index_db)
-            logger.info("Startup path index complete: %d files", count)
-        except Exception as e:
-            logger.warning("Startup index failed: %s", e)
-    asyncio.create_task(_run())
+# ── Lifespan Tasks completed ──────────────────────────────────────────────────
+
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-

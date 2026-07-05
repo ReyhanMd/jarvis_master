@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -25,7 +25,10 @@ class Settings(BaseModel):
     ollama_embed_model: str = Field(default=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"))
     ollama_embed_dim: int = Field(default=int(os.getenv("OLLAMA_EMBED_DIM", "768")))
     # Heat / RAM tuning (per-request overrides; see call_gemma)
-    ollama_num_ctx: int       = Field(default=int(os.getenv("OLLAMA_NUM_CTX", "4096")))
+    # Gemma3:4b supports up to 128K, but 8192 gives a comfortable headroom for
+    # the context packet (~3700 chars) + past chats + MCP + 4-6 history turns,
+    # without paying the VRAM cost of the full window.
+    ollama_num_ctx: int       = Field(default=int(os.getenv("OLLAMA_NUM_CTX", "8192")))
     ollama_num_thread: int    = Field(default=int(os.getenv("OLLAMA_NUM_THREAD", "4")))
     ollama_keep_alive: str    = Field(default=os.getenv("OLLAMA_KEEP_ALIVE", "5m"))
 
@@ -59,6 +62,15 @@ class Settings(BaseModel):
         "SHAIL_PATH_INDEX_DB",
         os.path.expanduser("~/Library/Application Support/SHAIL/memory/path_index.db"),
     ))
+    # Colon-separated list of extra roots to scan at startup (in addition to
+    # the auto-discovered defaults and any roots persisted in the DB).
+    # Example: SHAIL_SCAN_ROOTS=/Users/reyhan/shail workspace /shail_master:/Users/reyhan/work
+    scan_roots: List[str] = Field(
+        default_factory=lambda: [
+            p.strip() for p in os.getenv("SHAIL_SCAN_ROOTS", "").split(":")
+            if p.strip()
+        ]
+    )
     cloud_index_db: str = Field(default=os.getenv(
         "SHAIL_CLOUD_INDEX_DB",
         os.path.expanduser("~/Library/Application Support/SHAIL/memory/cloud_index.db"),
@@ -108,6 +120,16 @@ class Settings(BaseModel):
     shail_blueprint_versioning: bool = Field(default=os.getenv("SHAIL_BLUEPRINT_VERSIONING", "false").lower() == "true")
     shail_rerank:               bool = Field(default=os.getenv("SHAIL_RERANK", "false").lower() == "true")
     shail_retrieval_debug:      bool = Field(default=os.getenv("SHAIL_RETRIEVAL_DEBUG", "false").lower() == "true")
+    # Plan Part A5: lazy-embed local files matched by query before vector RAG runs.
+    shail_local_files_in_chat:  bool = Field(default=os.getenv("SHAIL_LOCAL_FILES_IN_CHAT", "true").lower() == "true")
+    # Production-hardening knobs for pointer-only local-file retrieval.
+    shail_local_files_k:               int   = Field(default=int(os.getenv("SHAIL_LOCAL_FILES_K", "5")))
+    shail_local_files_snippet_chars:   int   = Field(default=int(os.getenv("SHAIL_LOCAL_FILES_SNIPPET_CHARS", "1500")))
+    shail_local_files_read_cap_bytes:  int   = Field(default=int(os.getenv("SHAIL_LOCAL_FILES_READ_CAP_BYTES", "25000000")))
+    shail_local_files_min_score:       float = Field(default=float(os.getenv("SHAIL_LOCAL_FILES_MIN_SCORE", "0.05")))
+    # Plan Part B7: blueprint quality threshold for auto-redact gate (0.0–1.0).
+    blueprint_quality_threshold: float = Field(default=float(os.getenv("SHAIL_BLUEPRINT_QUALITY_THRESHOLD", "0.4")))
+    auto_redact_default:        bool = Field(default=os.getenv("SHAIL_AUTO_REDACT_DEFAULT", "false").lower() == "true")
     capture_artifacts_enabled:        bool = Field(default=os.getenv("SHAIL_CAPTURE_ARTIFACTS_ENABLED", "false").lower() == "true")
     capture_v2_enabled:               bool = Field(default=os.getenv("SHAIL_CAPTURE_V2_ENABLED", "false").lower() == "true")
     semantic_chunk_promotion_enabled: bool = Field(default=os.getenv("SHAIL_SEMANTIC_CHUNK_PROMOTION_ENABLED", "false").lower() == "true")
@@ -166,6 +188,51 @@ class Settings(BaseModel):
     usefulness_reranking_enabled:     bool  = Field(default=os.getenv("SHAIL_USEFULNESS_RERANK", "true").lower() == "true")
     usefulness_boost_weight:          float = Field(default=float(os.getenv("SHAIL_USEFULNESS_BOOST", "0.15")))
     usefulness_db:                    str   = Field(default=os.getenv("SHAIL_USEFULNESS_DB", os.path.expanduser("~/Library/Application Support/SHAIL/usefulness.db")))
+
+    # ── Dynamic blueprint sizing (replaces hard-coded 14K/16K/24K caps) ────
+    # context_tokens: target LLM context window in tokens. Defaults to
+    # ollama_num_ctx but may be overridden when using a model with a larger
+    # window than the live chat path.
+    blueprint_context_tokens:         int   = Field(default=int(os.getenv("SHAIL_BLUEPRINT_CONTEXT_TOKENS", "32768")))
+    blueprint_chars_per_token:        float = Field(default=float(os.getenv("SHAIL_BLUEPRINT_CHARS_PER_TOKEN", "3.5")))
+    blueprint_prompt_overhead_chars:  int   = Field(default=int(os.getenv("SHAIL_BLUEPRINT_PROMPT_OVERHEAD_CHARS", "3000")))
+    blueprint_response_reserve_pct:   float = Field(default=float(os.getenv("SHAIL_BLUEPRINT_RESPONSE_RESERVE_PCT", "0.25")))
+    blueprint_safety_margin_pct:      float = Field(default=float(os.getenv("SHAIL_BLUEPRINT_SAFETY_MARGIN_PCT", "0.05")))
+    blueprint_min_content_chars:      int   = Field(default=int(os.getenv("SHAIL_BLUEPRINT_MIN_CONTENT_CHARS", "8000")))
+    blueprint_window_overlap_pct:     float = Field(default=float(os.getenv("SHAIL_BLUEPRINT_WINDOW_OVERLAP_PCT", "0.15")))
+    # Hard ceiling for transcript build — defends against pathological inputs
+    # (10MB sessions etc.). 0 disables the ceiling.
+    blueprint_transcript_max_chars:   int   = Field(default=int(os.getenv("SHAIL_BLUEPRINT_TRANSCRIPT_MAX_CHARS", "2000000")))
+    # Per-capture ingestion ceiling (raised from 50K). Set to 0 to disable.
+    capture_ingest_max_chars:         int   = Field(default=int(os.getenv("SHAIL_CAPTURE_INGEST_MAX_CHARS", "2000000")))
+
+    # ── Blueprint field caps (raised + configurable; were hard-coded 12/32/8) ──
+    blueprint_max_decisions:          int   = Field(default=int(os.getenv("SHAIL_BP_MAX_DECISIONS", "64")))
+    blueprint_max_qa:                 int   = Field(default=int(os.getenv("SHAIL_BP_MAX_QA", "64")))
+    blueprint_max_open_questions:     int   = Field(default=int(os.getenv("SHAIL_BP_MAX_OPEN_QUESTIONS", "64")))
+    blueprint_max_next_actions:       int   = Field(default=int(os.getenv("SHAIL_BP_MAX_NEXT_ACTIONS", "64")))
+    blueprint_max_key_entities:       int   = Field(default=int(os.getenv("SHAIL_BP_MAX_KEY_ENTITIES", "32")))
+    blueprint_max_reasoning_chains:   int   = Field(default=int(os.getenv("SHAIL_BP_MAX_REASONING_CHAINS", "32")))
+    blueprint_max_failed_attempts:    int   = Field(default=int(os.getenv("SHAIL_BP_MAX_FAILED_ATTEMPTS", "32")))
+    blueprint_max_facts:              int   = Field(default=int(os.getenv("SHAIL_BP_MAX_FACTS", "256")))
+    blueprint_max_metrics:            int   = Field(default=int(os.getenv("SHAIL_BP_MAX_METRICS", "256")))
+    blueprint_max_tables:             int   = Field(default=int(os.getenv("SHAIL_BP_MAX_TABLES", "32")))
+    blueprint_max_table_rows:         int   = Field(default=int(os.getenv("SHAIL_BP_MAX_TABLE_ROWS", "512")))
+    blueprint_max_code_refs:          int   = Field(default=int(os.getenv("SHAIL_BP_MAX_CODE_REFS", "64")))
+    # Per-item char caps — still bounded to keep individual items sane.
+    blueprint_value_cap_chars:        int   = Field(default=int(os.getenv("SHAIL_BP_VALUE_CAP_CHARS", "2000")))
+    blueprint_summary_cap_chars:      int   = Field(default=int(os.getenv("SHAIL_BP_SUMMARY_CAP_CHARS", "2000")))
+
+    # ── Capture pipeline feature toggles ───────────────────────────────────────
+    capture_segments_enabled:         bool  = Field(default=os.getenv("SHAIL_CAPTURE_SEGMENTS_ENABLED", "true").lower() == "true")
+    pipeline_status_enabled:          bool  = Field(default=os.getenv("SHAIL_PIPELINE_STATUS_ENABLED", "true").lower() == "true")
+
+    # ── Single-User Mode ────────────────────────────────────────────────────────
+    # The one canonical account. All auth guards enforce this identity.
+    canonical_user_id:    str  = Field(default=os.getenv("SHAIL_CANONICAL_USER_ID", ""))
+    canonical_user_email: str  = Field(default=os.getenv("SHAIL_CANONICAL_EMAIL", ""))
+    # When false, POST /auth/register returns 403.
+    allow_registration:   bool = Field(default=os.getenv("SHAIL_ALLOW_REGISTRATION", "false").lower() == "true")
 
 
 _settings: Optional[Settings] = None

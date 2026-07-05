@@ -14,7 +14,18 @@ interface ChatMcpCitation {
   snippet: string;
   url: string | null;
 }
+interface ChatLocalFileCitation {
+  id: string;
+  title: string;
+  path: string;
+  snippet: string;
+  file_type: string;
+  score: number;
+}
 import { ChatRenderer } from '../components/ChatRenderer';
+import { BackfillBar } from '../components/phase-c/BackfillBar';
+import { RetentionToggle } from '../components/phase-c/RetentionToggle';
+import { TimelineView } from '../components/phase-c/TimelineView';
 import { useUIStore } from '../stores/ui';
 import { flag } from '../lib/featureFlags';
 
@@ -37,6 +48,7 @@ function citationsFromSseSets(
   pastChats?: ChatPastChatCitation[],
   web?: ChatWebSource[],
   mcp?: ChatMcpCitation[],
+  localFiles?: ChatLocalFileCitation[],
 ): StoredCitation[] {
   const out: StoredCitation[] = [];
   for (const m of memories ?? []) out.push({ type: 'memory', id: m.id, title: m.title, score: m.score });
@@ -50,6 +62,10 @@ function citationsFromSseSets(
   for (const c of mcp ?? []) out.push({
     type: 'mcp', id: c.id, provider: c.provider,
     title: c.title, snippet: c.snippet, url: c.url ?? undefined,
+  });
+  for (const f of localFiles ?? []) out.push({
+    type: 'local_file', id: f.id, title: f.title, path: f.path,
+    snippet: f.snippet, file_type: f.file_type, score: f.score,
   });
   return out;
 }
@@ -77,6 +93,9 @@ export function Chat() {
   const [input, setInput]         = useState(initialQ);
   const [streaming, setStreaming] = useState(false);
   const [loadingThread, setLoadingThread] = useState(false);
+  // Phase C UI — session-details panel + timeline view toggle (Sprint 5).
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [showTimeline, setShowTimeline] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inflight  = useRef<AbortController | null>(null);
 
@@ -148,6 +167,7 @@ export function Chat() {
       let pastChats: ChatPastChatCitation[] = [];
       let webHits:   ChatWebSource[]        = [];
       let mcpHits:   ChatMcpCitation[]      = [];
+      let localFileHits: ChatLocalFileCitation[] = [];
       let resolvedSessionId: string | undefined = activeId;
 
       const reader = res.body.getReader();
@@ -180,6 +200,8 @@ export function Chat() {
             webHits = evt.items as ChatWebSource[];
           } else if (t === 'mcp') {
             mcpHits = evt.items as ChatMcpCitation[];
+          } else if (t === 'local_files') {
+            localFileHits = evt.items as ChatLocalFileCitation[];
           }
 
           setTurns(prev => {
@@ -193,11 +215,11 @@ export function Chat() {
               if (evt.fellback) last.fallbackReason = (evt.reason as string) ?? '';
             } else if (t === 'delta') {
               last.content = (last.content || '') + ((evt.text as string) || '');
-            } else if (t === 'memories' || t === 'past_chats' || t === 'web' || t === 'mcp') {
-              last.citations = citationsFromSseSets(memories, pastChats, webHits, mcpHits);
+            } else if (t === 'memories' || t === 'past_chats' || t === 'web' || t === 'mcp' || t === 'local_files') {
+              last.citations = citationsFromSseSets(memories, pastChats, webHits, mcpHits, localFileHits);
             } else if (t === 'done') {
               last.id = evt.message_id as string;
-              last.citations = citationsFromSseSets(memories, pastChats, webHits, mcpHits);
+              last.citations = citationsFromSseSets(memories, pastChats, webHits, mcpHits, localFileHits);
               if (flag('ui_v2')) {
                 const ui = useUIStore.getState();
                 ui.setLastAnswerCitations(last.citations);
@@ -341,7 +363,33 @@ export function Chat() {
       {/* Main pane */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '24px 40px 12px', borderBottom: '1px solid #111' }}>
-          <div style={{ fontSize: 11, color: '#666', letterSpacing: '0.1em', fontFamily: MONO }}>CHAT</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 11, color: '#666', letterSpacing: '0.1em', fontFamily: MONO }}>CHAT</div>
+            {activeId && (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => { setShowTimeline(!showTimeline); }}
+                  style={{
+                    padding: '4px 10px', fontSize: 10, background: showTimeline ? '#1a1a1a' : 'transparent',
+                    color: showTimeline ? '#fff' : '#666', border: '1px solid #1e1e1e',
+                    borderRadius: 4, cursor: 'pointer', fontFamily: MONO, letterSpacing: '0.05em',
+                  }}
+                >
+                  {showTimeline ? 'CHAT' : 'TIMELINE'}
+                </button>
+                <button
+                  onClick={() => setDetailsOpen(!detailsOpen)}
+                  style={{
+                    padding: '4px 10px', fontSize: 10, background: detailsOpen ? '#1a1a1a' : 'transparent',
+                    color: detailsOpen ? '#fff' : '#666', border: '1px solid #1e1e1e',
+                    borderRadius: 4, cursor: 'pointer', fontFamily: MONO, letterSpacing: '0.05em',
+                  }}
+                >
+                  {detailsOpen ? '▾' : '▸'} CAPTURE
+                </button>
+              </div>
+            )}
+          </div>
           <h1 style={{ margin: '6px 0 0', fontSize: 22, fontWeight: 500, color: '#fff' }}>
             {activeId
               ? sessions.find(s => s.id === activeId)?.title || 'Conversation'
@@ -350,10 +398,18 @@ export function Chat() {
           <p style={{ margin: '6px 0 0', fontSize: 12, color: '#666' }}>
             Pulls from your memories, past chats, connected sources, and the live web.
           </p>
+          {activeId && detailsOpen && (
+            <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <BackfillBar sessionId={activeId} />
+              <RetentionToggle sessionId={activeId} />
+            </div>
+          )}
         </div>
 
         <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '20px 40px' }}>
-          {loadingThread ? (
+          {activeId && showTimeline ? (
+            <TimelineView sessionId={activeId} />
+          ) : loadingThread ? (
             <div style={{ marginTop: 40, color: '#3a3a3a', fontSize: 12 }}>Loading thread…</div>
           ) : turns.length === 0 ? (
             <div style={{ marginTop: 60, textAlign: 'center', color: '#3a3a3a', fontSize: 13 }}>

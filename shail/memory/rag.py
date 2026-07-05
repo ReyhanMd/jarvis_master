@@ -27,9 +27,13 @@ NS_CODE = "code"
 NS_LOGS = "logs"
 NS_DOCS = "docs"
 
-TEXT_EXTS = {".md", ".txt"}
-CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".cs", ".cpp", ".h", ".hpp", ".rs", ".go"}
+TEXT_EXTS = {".md", ".txt", ".rst", ".log"}
+CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".cs", ".cpp", ".h", ".hpp", ".rs", ".go", ".rb", ".swift", ".kt", ".sh", ".yaml", ".yml", ".toml", ".json"}
 LOG_EXTS = {".log"}
+PDF_EXTS = {".pdf"}
+DOCX_EXTS = {".docx", ".doc"}
+SHEET_EXTS = {".csv", ".xlsx", ".xls"}
+HTML_EXTS = {".html", ".htm", ".xhtml"}
 
 _vector_store: Optional[VectorStore] = None
 
@@ -81,9 +85,135 @@ def _detect_namespace(path: str) -> str:
         return NS_CODE
     if ext in LOG_EXTS:
         return NS_LOGS
-    if ext in TEXT_EXTS:
-        return NS_DOCS
     return NS_DOCS
+
+
+def _extract_text_from_file(path: str) -> str | None:
+    """Format-aware text extractor. Returns None if file cannot be read."""
+    ext = os.path.splitext(path)[1].lower()
+
+    # Plain text / code / markdown — UTF-8 decode
+    if ext in TEXT_EXTS or ext in CODE_EXTS or ext in LOG_EXTS:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except Exception as exc:
+            logger.warning("text read failed %s: %s", path, exc)
+            return None
+
+    # PDF
+    if ext in PDF_EXTS:
+        try:
+            import io
+            import pypdf  # type: ignore[import]
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            reader = pypdf.PdfReader(io.BytesIO(raw))
+            pages = [p.extract_text() or "" for p in reader.pages]
+            return "\n\n".join(t for t in pages if t.strip()) or None
+        except ImportError:
+            logger.warning("pypdf not installed — cannot ingest %s", path)
+            return None
+        except Exception as exc:
+            logger.warning("PDF extraction failed %s: %s", path, exc)
+            return None
+
+    # DOCX
+    if ext in DOCX_EXTS:
+        try:
+            import io
+            import docx  # type: ignore[import]
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            doc = docx.Document(io.BytesIO(raw))
+            parts = [p.text for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            return "\n\n".join(parts) or None
+        except ImportError:
+            logger.warning("python-docx not installed — cannot ingest %s", path)
+            return None
+        except Exception as exc:
+            logger.warning("DOCX extraction failed %s: %s", path, exc)
+            return None
+
+    # CSV
+    if ext == ".csv":
+        try:
+            import csv as _csv
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                rows = list(_csv.reader(fh))
+            lines = [" | ".join(str(c).strip() for c in row if str(c).strip()) for row in rows[:2000]]
+            return "\n".join(l for l in lines if l) or None
+        except Exception as exc:
+            logger.warning("CSV extraction failed %s: %s", path, exc)
+            return None
+
+    # XLSX
+    if ext in {".xlsx", ".xls"}:
+        try:
+            import io
+            import openpyxl  # type: ignore[import]
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            sections: list[str] = []
+            for sname in wb.sheetnames:
+                ws = wb[sname]
+                rows_text = []
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) for c in row if c is not None and str(c).strip()]
+                    if cells:
+                        rows_text.append(" | ".join(cells))
+                if rows_text:
+                    sections.append(f"[Sheet: {sname}]\n" + "\n".join(rows_text[:2000]))
+            wb.close()
+            return "\n\n".join(sections) or None
+        except ImportError:
+            logger.warning("openpyxl not installed — cannot ingest %s", path)
+            return None
+        except Exception as exc:
+            logger.warning("XLSX extraction failed %s: %s", path, exc)
+            return None
+
+    # HTML
+    if ext in HTML_EXTS:
+        try:
+            from html.parser import HTMLParser
+            _SKIP = frozenset({"script", "style", "head", "meta", "link", "noscript", "svg"})
+
+            class _Extractor(HTMLParser):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self._parts: list[str] = []
+                    self._depth = 0
+
+                def handle_starttag(self, tag: str, attrs: list) -> None:
+                    if tag in _SKIP:
+                        self._depth += 1
+
+                def handle_endtag(self, tag: str) -> None:
+                    if tag in _SKIP and self._depth:
+                        self._depth -= 1
+
+                def handle_data(self, data: str) -> None:
+                    if not self._depth and data.strip():
+                        self._parts.append(data.strip())
+
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                src = fh.read()
+            ex = _Extractor()
+            ex.feed(src)
+            return "\n".join(ex._parts) or None
+        except Exception as exc:
+            logger.warning("HTML extraction failed %s: %s", path, exc)
+            return None
+
+    logger.warning("Unsupported file type — skipping: %s", path)
+    return None
 
 
 def ingest(paths: Optional[List[str]] = None, records: Optional[List[Dict[str, Any]]] = None) -> int:
@@ -107,29 +237,42 @@ def ingest(paths: Optional[List[str]] = None, records: Optional[List[Dict[str, A
     # Handle file ingestion
     if paths:
         for path in paths:
+            text = _extract_text_from_file(path)
+            if not text:
+                logger.warning("No text extracted from %s — skipping", path)
+                continue
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    text = f.read()
-                namespace = _detect_namespace(path)
-                chunks = _chunk_text(text, chunk_size, overlap)
-                for idx, chunk in enumerate(chunks):
-                    metadata = {
-                        "file_path": path,
-                        "chunk_id": idx,
-                        "content_type": namespace,
-                        "source": "file",
-                    }
-                    embedding_records.append(
-                        EmbeddingRecord(
-                            id=None,
-                            namespace=namespace,
-                            content=chunk,
-                            metadata=metadata,
-                            embedding=[],
-                        )
+                p = __import__("pathlib").Path(path)
+                stat = p.stat()
+                mtime = stat.st_mtime
+                size_bytes = stat.st_size
+            except Exception:
+                mtime = 0.0
+                size_bytes = 0
+            namespace = _detect_namespace(path)
+            ext = os.path.splitext(path)[1].lower()
+            chunks = _chunk_text(text, chunk_size, overlap)
+            for idx, chunk in enumerate(chunks):
+                metadata = {
+                    "file_path": path,
+                    "file_name": os.path.basename(path),
+                    "file_type": ext.lstrip("."),
+                    "size_bytes": size_bytes,
+                    "mtime": mtime,
+                    "chunk_index": idx,
+                    "chunk_count": len(chunks),
+                    "content_type": namespace,
+                    "source": "file",
+                }
+                embedding_records.append(
+                    EmbeddingRecord(
+                        id=None,
+                        namespace=namespace,
+                        content=chunk,
+                        metadata=metadata,
+                        embedding=[],
                     )
-            except Exception as exc:
-                logger.warning("Failed to ingest %s: %s", path, exc)
+                )
 
     # Handle direct records (e.g., tool results)
     if records:

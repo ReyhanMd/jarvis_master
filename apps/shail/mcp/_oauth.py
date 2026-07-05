@@ -17,6 +17,83 @@ from shail.memory.rag import ingest
 
 logger = logging.getLogger(__name__)
 
+# ── Google token refresh ─────────────────────────────────────────────────────
+
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_REFRESH_WINDOW = 300  # refresh when < 5 min remain
+
+
+def _is_token_expired(expires_at: Optional[str]) -> bool:
+    """True if the token is within the refresh window or already expired."""
+    if not expires_at:
+        return False  # no expiry stored → assume permanent (e.g. GitHub)
+    try:
+        exp = datetime.fromisoformat(expires_at)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return (exp - datetime.now(timezone.utc)).total_seconds() < _REFRESH_WINDOW
+    except ValueError:
+        return False
+
+
+async def maybe_refresh_google_token(conn: dict) -> dict:
+    """If the stored Google access_token is near expiry, exchange the
+    refresh_token for a fresh one. Returns the (possibly updated) connection
+    dict and persists the new token to the DB.
+
+    Safe to call for non-Google providers or connections without refresh_token
+    — returns the connection unchanged in those cases.
+    """
+    if not _is_token_expired(conn.get("expires_at")):
+        return conn
+    refresh_token = conn.get("refresh_token")
+    if not refresh_token:
+        logger.warning(
+            "mcp token expired for %s/%s but no refresh_token stored — "
+            "user must reconnect the provider.",
+            conn.get("user_id"), conn.get("provider"),
+        )
+        return conn
+    from apps.shail.settings import get_settings
+    s = get_settings()
+    try:
+        resp = await post_form(
+            GOOGLE_TOKEN_URL,
+            {
+                "grant_type":    "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id":     s.google_client_id,
+                "client_secret": s.google_client_secret,
+            },
+        )
+        new_access = resp.get("access_token")
+        if not new_access:
+            raise ValueError(f"token refresh response missing access_token: {resp}")
+        expires_in = resp.get("expires_in")
+        new_expires = expires_at_iso(expires_in)
+        # Some responses re-issue a new refresh_token (rotation).
+        new_refresh = resp.get("refresh_token") or refresh_token
+        from apps.shail.mcp_store import save_connection
+        updated = save_connection(
+            conn["user_id"], conn["provider"],
+            access_token=new_access,
+            refresh_token=new_refresh,
+            expires_at=new_expires,
+            scope=conn.get("scope"),
+            metadata=conn.get("metadata"),
+        )
+        logger.info(
+            "mcp token refreshed for %s/%s expires_at=%s",
+            conn["user_id"], conn["provider"], new_expires,
+        )
+        return updated
+    except Exception as exc:
+        logger.error(
+            "mcp token refresh FAILED for %s/%s: %s — using stale token",
+            conn.get("user_id"), conn.get("provider"), exc,
+        )
+        return conn
+
 
 def expires_at_iso(expires_in_seconds: Optional[int]) -> Optional[str]:
     if not expires_in_seconds:

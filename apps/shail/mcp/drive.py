@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -12,7 +13,7 @@ from apps.shail.mcp.base import FetchHit, MCPProvider
 from apps.shail.mcp._oauth import (
     expires_at_iso, get_json, ingest_record, post_form,
 )
-from apps.shail.mcp_store import update_index_status
+from apps.shail.mcp_store import update_index_status, update_sync_cursor
 from apps.shail.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -85,15 +86,26 @@ class _Drive:
         }
 
     async def index(self, *, user_id: str, access_token: str, refresh_token: Optional[str], settings: dict) -> int:
+        """Full or incremental index. `settings.get("sync_cursor")` is an ISO
+        timestamp — when present, only files modified after that time are indexed.
+        """
         update_index_status(user_id, self.name, status="indexing", indexed_count=0)
         headers = {"Authorization": f"Bearer {access_token}"}
         ingested = 0
         page_token: Optional[str] = None
         max_docs = 200
+        sync_cursor = settings.get("sync_cursor")  # ISO timestamp or None (full)
+        sync_start = datetime.now(timezone.utc).isoformat()
+        # Build base query: full index or incremental delta
+        base_q = INDEX_QUERY
+        if sync_cursor:
+            # Drive accepts RFC3339 timestamps in modifiedTime filter
+            base_q = f"{base_q} and modifiedTime > '{sync_cursor}'"
+            logger.info("drive incremental sync from cursor=%s for user=%s", sync_cursor, user_id)
         try:
             while ingested < max_docs:
                 params = {
-                    "q":         INDEX_QUERY,
+                    "q":         base_q,
                     "fields":    "nextPageToken, files(id,name,mimeType,modifiedTime,webViewLink)",
                     "pageSize":  50,
                     "orderBy":   "modifiedTime desc",
@@ -123,6 +135,8 @@ class _Drive:
                 if not page_token:
                     break
             update_index_status(user_id, self.name, status="idle", indexed_count=ingested)
+            # Persist cursor so next sync is incremental
+            update_sync_cursor(user_id, self.name, sync_start)
         except Exception as e:
             logger.exception("drive index failed: %s", e)
             update_index_status(user_id, self.name, status="error", error=str(e)[:300])

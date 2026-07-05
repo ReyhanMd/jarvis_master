@@ -26,6 +26,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from apps.shail.auth_api import get_current_user
+from apps.shail.memory_delete import delete_memory_everywhere
+from apps.shail.source_normalization import (
+    is_browser_memory,
+    normalize_browser_metadata,
+)
 from shail.memory.rag import _get_store
 
 logger = logging.getLogger(__name__)
@@ -106,45 +111,116 @@ def _namespace(user_id: str) -> str:
     return f"user_{user_id}"
 
 
+# ── Graph helper utilities ───────────────────────────────────────────────────
+
+def _extract_domain(url: str) -> str:
+    """Return e.g. 'chatgpt.com' from any URL. Returns '' on parse failure."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        # strip leading www.
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return ""
+
+
+def _parse_tags(raw) -> list:
+    """
+    Safely parse tags field which may be a JSON-encoded list, a comma-separated
+    string, an actual Python list, or None.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(t) for t in raw if t]
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if stripped.startswith("["):
+            try:
+                import json
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(t) for t in parsed if t]
+            except Exception:
+                pass
+        # Fall back to comma-split
+        return [t.strip() for t in stripped.split(",") if t.strip()]
+    return []
+
+
+def _visible_namespaces(user_id: str) -> list[str]:
+    """Single-user mode: only the canonical namespace. No anonymous fallbacks."""
+    return [_namespace(user_id)]
+
+
+
 def _get_all_user_records(user_id: str):
     """
     Return all records from ChromaDB visible to this user.
-    Queries user-specific namespace + legacy anonymous namespaces so
-    captures from the browser extension (browser_memory) and macOS
-    watchdog (local) appear in the dashboard even before re-auth.
+    Single-user mode: queries only the canonical user namespace.
     Returns list of (id, document, metadata) tuples, deduplicated by id.
     """
     store = _get_store()
     if not hasattr(store, "collection"):
         return []
 
-    # Always include user namespace; also pull anonymous captures
-    namespaces = [_namespace(user_id), "browser_memory", "local"]
+    namespace = _namespace(user_id)
     all_records: list = []
     seen: set = set()
 
-    for ns in namespaces:
-        try:
-            result = store.collection.get(
-                where={"namespace": ns},
-                include=["documents", "metadatas"],
-            )
-        except Exception as exc:
-            logger.warning("Failed to fetch records for namespace %s: %s", ns, exc)
-            continue
+    try:
+        result = store.collection.get(
+            where={"namespace": namespace},
+            include=["documents", "metadatas"],
+            limit=5000,
+        )
+    except Exception as exc:
+        logger.warning("Failed to fetch records for namespace %s: %s", namespace, exc)
+        return []
 
-        ids   = result.get("ids", [])
-        docs  = result.get("documents", []) or [""] * len(ids)
-        metas = result.get("metadatas", []) or [{}] * len(ids)
-        for rid, doc, meta in zip(ids, docs, metas):
-            if rid not in seen:
-                seen.add(rid)
-                all_records.append((rid, doc, meta))
+    ids   = result.get("ids", [])
+    docs  = result.get("documents", []) or [""] * len(ids)
+    metas = result.get("metadatas", []) or [{}] * len(ids)
+    for rid, doc, meta in zip(ids, docs, metas):
+        meta = meta or {}
+        if not is_browser_memory(meta, doc or ""):
+            continue
+        meta = normalize_browser_metadata(meta, doc or "")
+        logical_id = meta.get("customId") or meta.get("parent_memory_id") or meta.get("id") or rid
+        if logical_id not in seen:
+            seen.add(logical_id)
+            all_records.append((logical_id, doc, meta))
+
+    try:
+        from apps.shail import raw_transcripts as _rt
+        for raw in _rt.list_recent(namespace=namespace, limit=5000):
+            raw_id = raw.get("memory_id")
+            if not raw_id or raw_id in seen:
+                continue
+            content = raw.get("content") or ""
+            meta = raw.get("metadata") or {}
+            if not is_browser_memory(meta, content):
+                continue
+            meta = normalize_browser_metadata(meta, content)
+            meta.setdefault("customId", raw_id)
+            meta.setdefault("id", raw_id)
+            meta.setdefault("eventType", raw.get("content_type", "page_visit"))
+            meta.setdefault("timestamp", raw.get("captured_at"))
+            if raw.get("embedded") == 0:
+                meta.setdefault("state", "indexing")
+            seen.add(raw_id)
+            all_records.append((raw_id, content, meta))
+    except Exception as exc:
+        logger.warning("Failed to merge raw transcript records for dashboard: %s", exc)
 
     return all_records
 
 
 def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = False) -> MemoryItem:
+    meta = normalize_browser_metadata(meta or {}, doc or "")
     title = meta.get("title", "")
     if not title:
         import re
@@ -230,9 +306,13 @@ async def list_memories(
     if tier:
         records = [(rid, doc, meta) for rid, doc, meta in records if (meta or {}).get("tier") == tier]
     if source:
+        source_norm = source.lower()
         records = [
             (rid, doc, meta) for rid, doc, meta in records
-            if (meta or {}).get("source") == source or (meta or {}).get("sourceApp") == source
+            if (meta or {}).get("source") == source_norm
+            or (meta or {}).get("sourceApp") == source_norm
+            or (meta or {}).get("source") == source
+            or (meta or {}).get("sourceApp") == source
         ]
 
     items = [_record_to_item(rid, doc, meta) for rid, doc, meta in records]
@@ -283,9 +363,20 @@ async def get_memory(
     metas = result.get("metadatas", [])
 
     if not ids:
+        try:
+            from apps.shail import raw_transcripts as _rt
+            raw = _rt.get(memory_id)
+            if raw and raw.get("namespace") == namespace and is_browser_memory(raw.get("metadata") or {}, raw.get("content") or ""):
+                return _record_to_item(memory_id, raw.get("content") or "", raw.get("metadata") or {}, include_content=True)
+        except Exception as exc:
+            logger.warning("Raw transcript detail fallback failed for %s: %s", memory_id, exc)
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    return _record_to_item(ids[0], docs[0] or "", metas[0] or {}, include_content=True)
+    meta = metas[0] or {}
+    doc = docs[0] or ""
+    if not is_browser_memory(meta, doc):
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return _record_to_item(ids[0], doc, meta, include_content=True)
 
 
 @dashboard_router.get("/memories/{memory_id}/related", response_model=List[MemoryItem])
@@ -364,10 +455,35 @@ async def patch_memory(
         raise HTTPException(status_code=500, detail=str(exc))
 
     if not result.get("ids"):
-        raise HTTPException(status_code=404, detail="Memory not found")
+        try:
+            from apps.shail import raw_transcripts as _rt
+            raw = _rt.get(memory_id)
+            if not raw or raw.get("namespace") != namespace:
+                raise HTTPException(status_code=404, detail="Memory not found")
+            meta = normalize_browser_metadata(raw.get("metadata") or {}, raw.get("content") or "")
+            if req.pinned is not None:
+                meta["pinned"] = "true" if req.pinned else "false"
+            if req.tags is not None:
+                meta["tags"] = json.dumps(req.tags)
+            _rt.save(
+                memory_id=memory_id,
+                user_id=user_id,
+                namespace=namespace,
+                content_type=raw.get("content_type", meta.get("eventType", "page_visit")),
+                content=raw.get("content") or "",
+                metadata=meta,
+                capture_mode=raw.get("capture_mode") or "active",
+            )
+            return _record_to_item(memory_id, raw.get("content") or "", meta, include_content=False)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Raw update failed: {exc}")
 
     meta = dict(result["metadatas"][0] or {})
     doc  = result["documents"][0] or ""
+    if not is_browser_memory(meta, doc):
+        raise HTTPException(status_code=404, detail="Memory not found")
 
     if req.pinned is not None:
         meta["pinned"] = "true" if req.pinned else "false"
@@ -376,6 +492,21 @@ async def patch_memory(
 
     try:
         store.collection.update(ids=[memory_id], metadatas=[meta])
+        try:
+            from apps.shail import raw_transcripts as _rt
+            raw = _rt.get(memory_id)
+            if raw and raw.get("namespace") == namespace:
+                _rt.save(
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    namespace=namespace,
+                    content_type=raw.get("content_type", meta.get("eventType", "page_visit")),
+                    content=raw.get("content") or "",
+                    metadata=meta,
+                    capture_mode=raw.get("capture_mode") or "active",
+                )
+        except Exception as raw_exc:
+            logger.warning("Raw transcript metadata update failed for %s: %s", memory_id, raw_exc)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Update failed: {exc}")
 
@@ -397,22 +528,37 @@ async def delete_memory(
     if not hasattr(store, "collection"):
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    namespace = _namespace(user_id)
     try:
-        owner = store.collection.get(
-            ids=[memory_id],
-            where={"namespace": namespace},
-        )
+        logical_id, deleted_ids = delete_memory_everywhere(store, memory_id, _visible_namespaces(user_id))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    if not owner.get("ids"):
-        raise HTTPException(status_code=404, detail="Memory not found")
+    if not deleted_ids:
+        try:
+            from apps.shail import raw_transcripts as _rt
+            raw = _rt.get(memory_id)
+            if not raw or raw.get("namespace") not in _visible_namespaces(user_id):
+                raise HTTPException(status_code=404, detail="Memory not found")
+            _rt.delete(memory_id)
+            logical_id = memory_id
+            deleted_ids = [memory_id]
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
+    from apps.shail.websocket_server import websocket_manager
+    import asyncio
     try:
-        ok = store.delete(memory_id)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return {"ok": ok, "id": memory_id}
+        loop = asyncio.get_running_loop()
+        loop.create_task(websocket_manager.broadcast_event("INVALIDATE_CACHE", {
+            "keys": ["memories", "stats"],
+            "action": "delete",
+            "id": memory_id
+        }))
+    except RuntimeError:
+        pass
+
+    return {"ok": True, "id": logical_id, "deleted": len(deleted_ids)}
 
 
 @dashboard_router.post("/memories/bulk-delete", response_model=BulkDeleteResponse)
@@ -430,25 +576,32 @@ async def bulk_delete(
     if not hasattr(store, "collection"):
         return BulkDeleteResponse(deleted=0)
 
-    namespace = _namespace(user_id)
-    try:
-        owned = store.collection.get(
-            ids=req.ids,
-            where={"namespace": namespace},
-        )
-    except Exception:
-        return BulkDeleteResponse(deleted=0)
-
-    owned_ids = set(owned.get("ids", []))
     deleted = 0
     for memory_id in req.ids:
-        if memory_id not in owned_ids:
-            continue
         try:
-            if store.delete(memory_id):
+            _, deleted_ids = delete_memory_everywhere(store, memory_id, _visible_namespaces(user_id))
+            if deleted_ids:
+                deleted += 1
+                continue
+            from apps.shail import raw_transcripts as _rt
+            raw = _rt.get(memory_id)
+            if raw and raw.get("namespace") in _visible_namespaces(user_id):
+                _rt.delete(memory_id)
                 deleted += 1
         except Exception:
             pass
+
+    from apps.shail.websocket_server import websocket_manager
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(websocket_manager.broadcast_event("INVALIDATE_CACHE", {
+            "keys": ["memories", "stats"],
+            "action": "clear"
+        }))
+    except RuntimeError:
+        pass
+
     return BulkDeleteResponse(deleted=deleted)
 
 
@@ -567,6 +720,8 @@ class GraphNode(BaseModel):
 class GraphEdge(BaseModel):
     source: str
     target: str
+    type: str = "same_day"          # conversation|same_url|shared_domain|shared_tags|same_app_day|token_overlap
+    weight: float = 0.3             # 0.0 – 1.0, used for visual thickness
 
 
 class MemoryGraph(BaseModel):
@@ -579,15 +734,38 @@ class MemoryGraph(BaseModel):
 async def memory_graph(
     user_id: str = Depends(get_current_user),
 ) -> MemoryGraph:
-    """Return a force-graph-compatible node/edge structure for all memories."""
+    """
+    Build a semantic knowledge graph from the user's memories.
+
+    Edge types (in priority order):
+      1. conversation  — same conversationId / chat session
+      2. same_url      — identical sourceUrl (strong signal)
+      3. shared_domain — same domain but different pages
+      4. shared_tags   — overlapping metadata tags
+      5. same_app_day  — same sourceApp on the same UTC day
+      6. token_overlap — significant word overlap in title+summary (TF-IDF-like)
+
+    Each edge has a `type` and `weight` field so the dashboard can style edges
+    differently. Multiple edge types between the same pair are collapsed into
+    one edge (highest weight wins).
+    """
     records = _get_all_user_records(user_id)
 
     nodes: List[GraphNode] = []
     edges: List[GraphEdge] = []
 
-    # Group by sourceUrl (same URL → edge) and by date bucket (same day → edge)
+    # Index structures for fast link discovery
+    conv_to_ids: dict[str, list[str]] = defaultdict(list)
     url_to_ids: dict[str, list[str]] = defaultdict(list)
-    day_to_ids: dict[str, list[str]] = defaultdict(list)
+    domain_to_ids: dict[str, list[str]] = defaultdict(list)
+    day_app_to_ids: dict[str, list[str]] = defaultdict(list)
+    tag_to_ids: dict[str, list[str]] = defaultdict(list)
+
+    # For token-overlap linkage
+    rid_tokens: dict[str, set[str]] = {}
+    STOP = {"the", "a", "an", "of", "to", "in", "is", "and", "for", "on",
+            "at", "it", "as", "be", "by", "or", "this", "that", "with",
+            "from", "was", "are", "has", "have", "had", "not", "but", "web"}
 
     for rid, _doc, meta in records:
         meta = meta or {}
@@ -604,25 +782,106 @@ async def memory_graph(
             importance=importance,
         ))
 
+        conv = meta.get("conversationId") or meta.get("sessionId")
+        if conv:
+            conv_to_ids[conv].append(rid)
+
         url = meta.get("sourceUrl", "")
-        if url:
+        if url and len(url) > 8:
             url_to_ids[url].append(rid)
+            domain = _extract_domain(url)
+            if domain:
+                domain_to_ids[domain].append(rid)
 
         day = ts[:10]
-        day_to_ids[day].append(rid)
+        app = meta.get("sourceApp", "web")
+        if day and app:
+            day_app_to_ids[f"{day}::{app}"].append(rid)
 
-    # Edges: same URL
+        raw_tags = _parse_tags(meta.get("tags"))
+        for tag in raw_tags:
+            t = tag.strip().lower()
+            if t:
+                tag_to_ids[t].append(rid)
+
+        # token set for overlap scoring
+        text = f"{label} {meta.get('summary', '')}".lower()
+        tokens = {w for w in text.split() if len(w) > 3 and w not in STOP}
+        if tokens:
+            rid_tokens[rid] = tokens
+
+    # Build edge set (deduplicated by pair, best weight wins)
+    edge_map: dict[tuple[str, str], dict] = {}
+
+    def _add_edge(a: str, b: str, etype: str, weight: float) -> None:
+        key = (min(a, b), max(a, b))
+        if key not in edge_map or edge_map[key]["weight"] < weight:
+            edge_map[key] = {"type": etype, "weight": weight}
+
+    # 1. Conversation edges (weight 1.0)
+    for ids in conv_to_ids.values():
+        for i in range(len(ids)):
+            for j in range(i + 1, min(i + 6, len(ids))):
+                _add_edge(ids[i], ids[j], "conversation", 1.0)
+
+    # 2. Same URL (weight 0.95)
     for ids in url_to_ids.values():
-        for i in range(len(ids) - 1):
-            edges.append(GraphEdge(source=ids[i], target=ids[i + 1]))
+        for i in range(len(ids)):
+            for j in range(i + 1, min(i + 8, len(ids))):
+                _add_edge(ids[i], ids[j], "same_url", 0.95)
 
-    # Edges: same day (cap per day to avoid explosion)
-    for ids in day_to_ids.values():
+    # 3. Shared domain (weight 0.5) — cap per domain to avoid explosion
+    for ids in domain_to_ids.values():
+        # only link adjacent (sorted by time), max 6 per domain
         bucket = ids[:8]
         for i in range(len(bucket) - 1):
-            edges.append(GraphEdge(source=bucket[i], target=bucket[i + 1]))
+            _add_edge(bucket[i], bucket[i + 1], "shared_domain", 0.5)
+
+    # 4. Shared tags (weight 0.7)
+    for tag_ids in tag_to_ids.values():
+        bucket = tag_ids[:10]
+        for i in range(len(bucket)):
+            for j in range(i + 1, len(bucket)):
+                _add_edge(bucket[i], bucket[j], "shared_tags", 0.7)
+
+    # 5. Same app+day (weight 0.3, cap at 5 per bucket)
+    for ids in day_app_to_ids.values():
+        bucket = ids[:6]
+        for i in range(len(bucket) - 1):
+            _add_edge(bucket[i], bucket[i + 1], "same_app_day", 0.3)
+
+    # 6. Token overlap (weight proportional to Jaccard similarity)
+    # Only compute for nodes that aren't already heavily connected
+    id_list = [r for r, _, _ in records if r in rid_tokens]
+    # Limit O(n²) to manageable size — process at most 200 most-recent nodes
+    id_list = id_list[:200]
+    for i in range(len(id_list)):
+        for j in range(i + 1, len(id_list)):
+            a, b = id_list[i], id_list[j]
+            key = (min(a, b), max(a, b))
+            if key in edge_map:
+                continue  # already linked by stronger signal
+            ta, tb = rid_tokens.get(a, set()), rid_tokens.get(b, set())
+            if not ta or not tb:
+                continue
+            inter = len(ta & tb)
+            if inter < 2:
+                continue
+            jaccard = inter / len(ta | tb)
+            if jaccard >= 0.15:
+                _add_edge(a, b, "token_overlap", round(jaccard * 0.6, 3))
+
+    # Materialise edges
+    for (src, tgt), props in edge_map.items():
+        edges.append(GraphEdge(
+            source=src,
+            target=tgt,
+            type=props.get("type", "same_day"),
+            weight=props.get("weight", 0.3),
+        ))
 
     return MemoryGraph(nodes=nodes, edges=edges)
+
 
 
 # ── Share tokens ───────────────────────────────────────────────────────────────

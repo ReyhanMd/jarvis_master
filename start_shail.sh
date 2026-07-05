@@ -200,10 +200,8 @@ log "Starting Shail API"
 if check_port 8000; then
   log "Port 8000 already in use — assuming Shail API already running"
 else
-  pushd "$ROOT/apps/shail" >/dev/null
-  "$PYTHON_BIN" -m uvicorn main:app --host 127.0.0.1 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
+  PYTHONPATH="$ROOT" "$PYTHON_BIN" -m uvicorn apps.shail.main:app --host 127.0.0.1 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
   API_PID=$!
-  popd >/dev/null
   echo $API_PID >"$PID_DIR/shail_api.pid"
   wait_for_port "Shail API" 8000
   if ! check_port 8000; then
@@ -217,10 +215,8 @@ fi
 
 # Start task worker
 log "Starting task worker"
-pushd "$ROOT" >/dev/null
-"$PYTHON_BIN" -m shail.workers.task_worker >"$LOG_DIR/task_worker.log" 2>&1 &
+PYTHONPATH="$ROOT" "$PYTHON_BIN" -m shail.workers.task_worker >"$LOG_DIR/task_worker.log" 2>&1 &
 WORKER_PID=$!
-popd >/dev/null
 echo $WORKER_PID >"$PID_DIR/task_worker.pid"
 
 log "All services started. Logs in $LOG_DIR; PIDs in $PID_DIR."

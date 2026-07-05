@@ -27,17 +27,31 @@ def _now() -> str:
 
 # ── Sessions ────────────────────────────────────────────────────────────────
 
-def create_session(user_id: str, title: str = "New chat") -> dict:
+def create_session(
+    user_id: str, title: str = "New chat", *, source: Optional[str] = None,
+) -> dict:
+    """Create a chat session.
+
+    `source` (Sprint 6): provenance for imported sessions ('chatgpt' | 'claude' |
+    'cursor'). NULL for native SHAIL sessions. Requires Phase C schema applied.
+    """
     sid = str(uuid.uuid4())
     now = _now()
     with _conn() as con:
-        con.execute(
-            "INSERT INTO chat_sessions (id, user_id, title, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (sid, user_id, title, now, now),
-        )
+        if source is not None:
+            con.execute(
+                "INSERT INTO chat_sessions (id, user_id, title, created_at, updated_at, source) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, user_id, title, now, now, source),
+            )
+        else:
+            con.execute(
+                "INSERT INTO chat_sessions (id, user_id, title, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sid, user_id, title, now, now),
+            )
     return {"id": sid, "user_id": user_id, "title": title,
-            "created_at": now, "updated_at": now, "pinned": False}
+            "created_at": now, "updated_at": now, "pinned": False, "source": source}
 
 
 def get_session(session_id: str, user_id: str) -> Optional[dict]:
@@ -117,6 +131,12 @@ def touch_session(session_id: str) -> None:
 
 
 def _row_to_session(row: sqlite3.Row) -> dict:
+    # `source` (Sprint 6) may be absent on older DBs predating Phase C schema.
+    source: Optional[str] = None
+    try:
+        source = row["source"]
+    except (KeyError, IndexError):
+        pass
     return {
         "id": row["id"],
         "user_id": row["user_id"],
@@ -124,6 +144,7 @@ def _row_to_session(row: sqlite3.Row) -> dict:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "pinned": bool(row["pinned"]),
+        "source": source,
     }
 
 
@@ -195,6 +216,137 @@ def get_message(message_id: str) -> Optional[dict]:
             "SELECT * FROM chat_messages WHERE id = ?", (message_id,),
         ).fetchone()
     return _row_to_message(row) if row else None
+
+
+def get_messages_paginated(
+    session_id: str, user_id: str, *, offset: int = 0, limit: int = 50,
+) -> list[dict]:
+    """Streaming-friendly page of messages, oldest first. Used by chunked backfill."""
+    with _conn() as con:
+        owner = con.execute(
+            "SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?",
+            (session_id, user_id),
+        ).fetchone()
+        if not owner:
+            return []
+        rows = con.execute(
+            "SELECT * FROM chat_messages WHERE session_id = ? "
+            "ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            (session_id, limit, offset),
+        ).fetchall()
+    return [_row_to_message(r) for r in rows]
+
+
+# ── FTS5 fallback for chat content ──────────────────────────────────────────
+
+def _fts5_available(con: sqlite3.Connection) -> bool:
+    try:
+        con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x)")
+        con.execute("DROP TABLE IF EXISTS _fts5_probe")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def ensure_chat_fts_schema() -> None:
+    """Idempotent: create chat_messages_fts virtual table + triggers.
+
+    Provides keyword fallback when vector indexing is unavailable (Ollama down).
+    Safe to call repeatedly. On first creation, backfills existing chat_messages
+    rows into the FTS index.
+    """
+    with _conn() as con:
+        if not _fts5_available(con):
+            return  # FTS5 not compiled in this SQLite build — silent skip
+        existing = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chat_messages_fts'"
+        ).fetchone()
+        first_time = existing is None
+        # Standalone (non-content-table) FTS5 so we can store metadata columns
+        # with names that differ from chat_messages. Triggers keep it synced.
+        con.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                content,
+                session_id UNINDEXED,
+                user_id UNINDEXED,
+                message_id UNINDEXED,
+                role UNINDEXED
+            );
+            CREATE TRIGGER IF NOT EXISTS chat_messages_ai
+            AFTER INSERT ON chat_messages BEGIN
+                INSERT INTO chat_messages_fts(rowid, content, session_id, user_id, message_id, role)
+                VALUES (new.rowid, new.content, new.session_id, new.user_id, new.id, new.role);
+            END;
+            CREATE TRIGGER IF NOT EXISTS chat_messages_ad
+            AFTER DELETE ON chat_messages BEGIN
+                DELETE FROM chat_messages_fts WHERE rowid = old.rowid;
+            END;
+            CREATE TRIGGER IF NOT EXISTS chat_messages_au
+            AFTER UPDATE ON chat_messages BEGIN
+                DELETE FROM chat_messages_fts WHERE rowid = old.rowid;
+                INSERT INTO chat_messages_fts(rowid, content, session_id, user_id, message_id, role)
+                VALUES (new.rowid, new.content, new.session_id, new.user_id, new.id, new.role);
+            END;
+        """)
+        if first_time:
+            # Populate FTS with pre-existing chat_messages rows so historical
+            # content becomes keyword-searchable immediately.
+            con.execute(
+                "INSERT INTO chat_messages_fts(rowid, content, session_id, user_id, message_id, role) "
+                "SELECT rowid, content, session_id, user_id, id, role FROM chat_messages"
+            )
+
+
+def fts_available() -> bool:
+    """True if chat_messages_fts virtual table exists and is queryable."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chat_messages_fts'"
+        ).fetchone()
+    return row is not None
+
+
+def search_chat_fts(
+    user_id: str, query: str, *, limit: int = 20, session_id: Optional[str] = None,
+) -> list[dict]:
+    """Keyword search over chat content via FTS5. Returns hits with content + metadata.
+
+    Used as fallback retrieval when vector search is unavailable. Returns empty
+    list if FTS5 not compiled in or table missing.
+    """
+    if not fts_available() or not query.strip():
+        return []
+    # Sanitize: FTS5 query syntax — escape double quotes by doubling them
+    safe_q = query.replace('"', '""')
+    with _conn() as con:
+        if session_id:
+            rows = con.execute(
+                "SELECT message_id, session_id, role, content, "
+                "bm25(chat_messages_fts) AS rank "
+                "FROM chat_messages_fts "
+                "WHERE chat_messages_fts MATCH ? AND user_id = ? AND session_id = ? "
+                "ORDER BY rank LIMIT ?",
+                (f'"{safe_q}"', user_id, session_id, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT message_id, session_id, role, content, "
+                "bm25(chat_messages_fts) AS rank "
+                "FROM chat_messages_fts "
+                "WHERE chat_messages_fts MATCH ? AND user_id = ? "
+                "ORDER BY rank LIMIT ?",
+                (f'"{safe_q}"', user_id, limit),
+            ).fetchall()
+    return [
+        {
+            "message_id": r["message_id"],
+            "session_id": r["session_id"],
+            "role": r["role"],
+            "content": r["content"],
+            "rank": float(r["rank"]) if r["rank"] is not None else 0.0,
+        }
+        for r in rows
+    ]
 
 
 def _row_to_message(row: sqlite3.Row) -> dict:

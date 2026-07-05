@@ -17,6 +17,7 @@ const SECONDARY_NAV = [
   { to: '/graph',       label: 'Graph',        icon: '⬡' },
   { to: '/graphify',    label: 'Graphify',     icon: '◈' },
   { to: '/connections', label: 'Connections',  icon: '⊕' },
+  { to: '/files',       label: 'Local Files',  icon: '⌸' },
   { to: '/services',    label: 'Services',     icon: '◉' },
   { to: '/export',      label: 'Export',       icon: '↓' },
   { to: '/settings',    label: 'Settings',     icon: '⚙' },

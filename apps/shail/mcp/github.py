@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from apps.shail.mcp.base import FetchHit, MCPProvider
 from apps.shail.mcp._oauth import get_json, ingest_record, post_form
-from apps.shail.mcp_store import update_index_status
+from apps.shail.mcp_store import update_index_status, update_sync_cursor
 from apps.shail.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -68,10 +68,17 @@ class _GitHub:
         }
 
     async def index(self, *, user_id: str, access_token: str, refresh_token: Optional[str], settings: dict) -> int:
-        """Index README + repo metadata for owner repos. v1 cap: 50 repos."""
+        """Index README + repo metadata for owner repos.
+
+        Incremental sync: if `settings.sync_cursor` is set (ISO timestamp),
+        only repos pushed after that time are re-indexed. v1 cap: 50 repos.
+        """
+        from datetime import datetime, timezone
         update_index_status(user_id, self.name, status="indexing", indexed_count=0)
         headers = self._headers(access_token)
         ingested = 0
+        sync_cursor = settings.get("sync_cursor")
+        sync_start = datetime.now(timezone.utc).isoformat()
         try:
             repos = await get_json(
                 f"{API}/user/repos",
@@ -80,6 +87,10 @@ class _GitHub:
             )
             if not isinstance(repos, list):
                 repos = []
+            # Incremental: skip repos with pushed_at <= cursor
+            if sync_cursor:
+                repos = [r for r in repos if (r.get("pushed_at") or "") > sync_cursor]
+                logger.info("github incremental: %d repos changed since %s", len(repos), sync_cursor)
             for r in repos[:50]:
                 full = r.get("full_name", "")
                 desc = r.get("description") or ""
@@ -109,6 +120,7 @@ class _GitHub:
                 )
                 update_index_status(user_id, self.name, status="indexing", indexed_count=ingested)
             update_index_status(user_id, self.name, status="idle", indexed_count=ingested)
+            update_sync_cursor(user_id, self.name, sync_start)
         except Exception as e:
             logger.exception("github index failed: %s", e)
             update_index_status(user_id, self.name, status="error", error=str(e)[:300])

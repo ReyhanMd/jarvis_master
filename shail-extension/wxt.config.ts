@@ -7,7 +7,7 @@ export default defineConfig({
     description: 'Passively captures your AI conversations and web browsing. Search and inject context back into any AI chat.',
     version: '0.1.0',
     permissions: ['tabs', 'activeTab', 'storage', 'scripting', 'sidePanel'],
-    host_permissions: ['<all_urls>', 'http://localhost/*', 'http://127.0.0.1/*'],
+    host_permissions: ['<all_urls>', 'http://localhost/*', 'http://127.0.0.1/*', 'https://grok.com/*', 'https://x.ai/*'],
     content_security_policy: {
       extension_pages: "script-src 'self'; object-src 'self'; connect-src http://localhost:8000 http://127.0.0.1:8000",
     },

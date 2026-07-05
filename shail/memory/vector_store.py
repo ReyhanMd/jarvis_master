@@ -39,6 +39,16 @@ class VectorStore:
     def delete_ids(self, ids: List[str]) -> None:
         raise NotImplementedError
 
+    def delete(self, id: str) -> bool:
+        """Delete a single record by ID. Returns True if the record existed."""
+        try:
+            self.delete_ids([id])
+            return True
+        except NotImplementedError:
+            raise
+        except Exception:
+            return False
+
 
 class PgVectorStore(VectorStore):
     """Postgres + pgvector implementation."""
@@ -249,10 +259,15 @@ class ChromaVectorStore(VectorStore):
         chroma_filters = filters.copy() if filters else {}
         if namespace:
             chroma_filters["namespace"] = namespace
+        # Chroma requires $and when there are multiple where conditions.
+        if len(chroma_filters) > 1:
+            where: Optional[Dict[str, Any]] = {"$and": [{k: v} for k, v in chroma_filters.items()]}
+        else:
+            where = chroma_filters or None
         res = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=k,
-            where=chroma_filters or None,
+            where=where,
         )
         results: List[Dict[str, Any]] = []
         docs = res.get("documents", [[]])[0]

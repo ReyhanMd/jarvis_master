@@ -1,0 +1,21 @@
+{
+  "decisions": [],
+  "extensions": {},
+  "facts": [],
+  "failed_attempts": [],
+  "key_entities": [
+    "Tesla"
+  ],
+  "metrics": [],
+  "next_actions": [],
+  "open_questions": [],
+  "questions_answered": [
+    {
+      "a": "$81B",
+      "q": "Tesla 2023 revenue?"
+    }
+  ],
+  "reasoning_chains": [],
+  "summary": "Tesla revenue grew 62% YoY in 2023.",
+  "tables": []
+}

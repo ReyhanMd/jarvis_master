@@ -1,0 +1,7 @@
+{
+  "id": "fixture-multi-version-001",
+  "kind": "ai_conversation",
+  "title": "Churn metric updated",
+  "content": "User: What was our January 2025 churn?\nAssistant: Based on the data dashboard exported on February 1, January 2025 monthly churn was 4.2%.\n\n[Two weeks later]\n\nUser: Recompute January 2025 churn with the corrected cohort definition.\nAssistant: Recomputed. January 2025 monthly churn is 3.8% under the new cohort rule. The 4.2% figure was based on a cohort that incorrectly included paused accounts.",
+  "captured_ts": "2025-02-15T09:00:00Z"
+}

@@ -144,22 +144,28 @@ class PerceptionServiceConnector:
             self._ax_ws = await websockets.connect(self.ax_uri)
             self._reconnect_delay = 1.0
         except Exception:
-            await self._reconnect_with_backoff("ax")
+            self._ax_ws = None
 
     async def _connect_capture(self):
         try:
             self._capture_ws = await websockets.connect(self.capture_uri)
             self._reconnect_delay = 1.0
         except Exception:
-            await self._reconnect_with_backoff("capture")
+            self._capture_ws = None
 
     async def _reconnect_with_backoff(self, service: str):
-        await asyncio.sleep(self._reconnect_delay)
-        self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
-        if service == "ax":
-            await self._connect_ax()
-        else:
-            await self._connect_capture()
+        # Iterative backoff — avoids stack overflow when native services stay down.
+        while True:
+            await asyncio.sleep(self._reconnect_delay)
+            self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
+            if service == "ax":
+                await self._connect_ax()
+                if self._ax_ws is not None:
+                    return
+            else:
+                await self._connect_capture()
+                if self._capture_ws is not None:
+                    return
 
     def _parse_accessibility_event(self, data: dict) -> Optional[AccessibilityEvent]:
         if data.get("type") != "accessibility_event":

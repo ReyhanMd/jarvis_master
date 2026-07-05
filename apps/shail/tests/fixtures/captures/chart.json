@@ -1,0 +1,7 @@
+{
+  "id": "fixture-chart-001",
+  "kind": "ai_conversation",
+  "title": "Tesla revenue review",
+  "content": "User: Pull the Tesla revenue chart for the last two years.\nAssistant: Here is the data from the 10-K filings.\n\n| Year | Revenue | YoY Growth |\n| ---- | ------- | ---------- |\n| 2022 | $50.0B  | 51%        |\n| 2023 | $81.0B  | 62%        |\n\nKey takeaway: Tesla revenue grew 62% YoY in 2023, reaching $81B, primarily driven by automotive segment expansion. Operating margin compressed from 16.8% to 9.2% over the same period.",
+  "captured_ts": "2024-02-15T10:00:00Z"
+}
