@@ -49,7 +49,14 @@ from shail.memory.path_index import (
     add_root as path_add_root,
     remove_root as path_remove_root,
     list_roots as path_list_roots,
+    add_deny_path as path_add_deny_path,
+    remove_deny_path as path_remove_deny_path,
+    list_deny_paths as path_list_deny_paths,
     _default_roots,
+    get_onboarding_state as path_get_onboarding_state,
+    complete_onboarding as path_complete_onboarding,
+    reset_onboarding as path_reset_onboarding,
+    get_active_scan_roots as path_get_active_scan_roots,
 )
 from shail.memory.embeddings import embed_texts, embed_query
 
@@ -128,6 +135,15 @@ class PathContentResponse(BaseModel):
     path: str
     content: str
     file_type: str
+
+
+class CompleteOnboardingRequest(BaseModel):
+    approved_roots: List[str] = Field(default_factory=list)
+    denied_paths: List[str] = Field(default_factory=list)
+    scan_now: bool = True
+    acknowledged: bool = False
+    skipped: bool = False
+    scan_mode: str = "manual_approved_roots_only"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -384,9 +400,14 @@ async def unified_search(
 
 # ── Path Index endpoints ──────────────────────────────────────────────────────
 
-def _run_scan(db_path: str) -> None:
+def _active_roots_for_settings() -> List[str]:
+    settings = get_settings()
+    return path_get_active_scan_roots(settings.path_index_db, env_roots=settings.scan_roots)
+
+
+def _run_scan(db_path: str, roots: Optional[List[str]] = None) -> None:
     try:
-        count = path_scan(db_path)
+        count = path_scan(db_path, roots=roots)
         logger.info("Path index scan complete: %d files indexed", count)
     except Exception as e:
         logger.error("Path index scan error: %s", e)
@@ -415,7 +436,7 @@ async def search_path_index(q: str = "", limit: int = 20) -> PathSearchResponse:
 async def sync_path_index(background_tasks: BackgroundTasks) -> SyncResponse:
     """Trigger async filesystem scan. Returns immediately."""
     settings = get_settings()
-    background_tasks.add_task(_run_scan, settings.path_index_db)
+    background_tasks.add_task(_run_scan, settings.path_index_db, _active_roots_for_settings())
     return SyncResponse(status="scanning")
 
 
@@ -470,17 +491,9 @@ async def open_path(
     if not record:
         raise HTTPException(status_code=404, detail="path not in index")
 
-    # Security: Verify the path is within the allowed active scan roots
+    # Security: Verify the path is within the allowed active scan roots.
     from pathlib import Path as _Path
-    from shail.memory.path_index import _default_roots, list_roots as path_list_roots
-    
-    persisted = path_list_roots(settings.path_index_db)
-    env_roots = [r for r in settings.scan_roots if r.strip()]
-    defaults = _default_roots()
-    active_roots = [
-        _Path(r).resolve() 
-        for r in list(dict.fromkeys(env_roots + [r["path"] for r in persisted] + defaults))
-    ]
+    active_roots = [_Path(r).resolve() for r in _active_roots_for_settings()]
     
     try:
         resolved_file = _Path(path).resolve()
@@ -507,19 +520,24 @@ class RootRequest(BaseModel):
     path: str
 
 
+class DenyPathRequest(BaseModel):
+    path: str
+    reason: Optional[str] = None
+
+
 @path_idx_router.get("/roots")
 async def list_scan_roots() -> Dict[str, Any]:
     """List all scan roots: env-configured, persisted, and auto-discovered defaults."""
     settings = get_settings()
     persisted = path_list_roots(settings.path_index_db)
-    persisted_paths = {r["path"] for r in persisted}
     env_roots = [r for r in settings.scan_roots if r.strip()]
     defaults = _default_roots()
+    active_roots = path_get_active_scan_roots(settings.path_index_db, env_roots=env_roots)
     return {
         "env_roots": env_roots,
         "persisted_roots": persisted,
         "default_roots": defaults,
-        "active_roots": list(dict.fromkeys(env_roots + [r["path"] for r in persisted] + defaults)),
+        "active_roots": active_roots,
     }
 
 
@@ -549,11 +567,84 @@ async def add_scan_root(
     return {"ok": True, "added": True, "path": req.path, "message": "root added and scan queued"}
 
 
+@path_idx_router.get("/onboarding")
+async def get_path_onboarding() -> Dict[str, Any]:
+    """Return first-run local-file onboarding state and recommended folders."""
+    settings = get_settings()
+    return path_get_onboarding_state(settings.path_index_db)
+
+
+@path_idx_router.post("/onboarding/complete")
+async def complete_path_onboarding(
+    req: CompleteOnboardingRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """Persist approved local-file roots and mark onboarding complete."""
+    settings = get_settings()
+    try:
+        state = path_complete_onboarding(
+            settings.path_index_db,
+            approved_roots=req.approved_roots,
+            denied_paths=req.denied_paths,
+            acknowledged=req.acknowledged,
+            skipped=req.skipped,
+            scan_mode=req.scan_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if req.scan_now and not req.skipped:
+        roots = path_get_active_scan_roots(settings.path_index_db, env_roots=settings.scan_roots)
+        background_tasks.add_task(_run_scan, settings.path_index_db, roots)
+        state["scan_status"] = "queued"
+    else:
+        state["scan_status"] = "skipped"
+    return state
+
+
+@path_idx_router.post("/onboarding/reset")
+async def reset_path_onboarding() -> Dict[str, Any]:
+    """Reset first-run local-file onboarding state. Does not delete indexed rows."""
+    settings = get_settings()
+    return path_reset_onboarding(settings.path_index_db)
+
+
 @path_idx_router.delete("/roots")
 async def remove_scan_root(req: RootRequest) -> Dict[str, Any]:
     """Remove a persisted scan root (does NOT delete already-indexed files)."""
     settings = get_settings()
     removed = path_remove_root(settings.path_index_db, req.path)
+    return {"ok": True, "removed": removed, "path": req.path}
+
+
+@path_idx_router.get("/denylist")
+async def list_path_denylist(
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """List persisted local paths SHAIL is not allowed to read."""
+    settings = get_settings()
+    return {"items": path_list_deny_paths(settings.path_index_db)}
+
+
+@path_idx_router.post("/denylist")
+async def add_path_denylist(
+    req: DenyPathRequest,
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Add a local path to the do-not-read list."""
+    settings = get_settings()
+    added = path_add_deny_path(settings.path_index_db, req.path, reason=req.reason or "")
+    return {"ok": True, "added": added, "path": req.path}
+
+
+@path_idx_router.delete("/denylist")
+async def remove_path_denylist(
+    req: RootRequest,
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Remove a local path from the do-not-read list."""
+    settings = get_settings()
+    removed = path_remove_deny_path(settings.path_index_db, req.path)
     return {"ok": True, "removed": removed, "path": req.path}
 
 
@@ -586,17 +677,9 @@ async def get_path_content(
 
     file_path = os.path.abspath(record["path"])
     
-    # Security: Verify the path is within the allowed active scan roots
+    # Security: Verify the path is within the allowed active scan roots.
     from pathlib import Path as _Path
-    from shail.memory.path_index import _default_roots, list_roots as path_list_roots
-    
-    persisted = path_list_roots(settings.path_index_db)
-    env_roots = [r for r in settings.scan_roots if r.strip()]
-    defaults = _default_roots()
-    active_roots = [
-        _Path(r).resolve() 
-        for r in list(dict.fromkeys(env_roots + [r["path"] for r in persisted] + defaults))
-    ]
+    active_roots = [_Path(r).resolve() for r in _active_roots_for_settings()]
     
     try:
         resolved_file = _Path(file_path).resolve()

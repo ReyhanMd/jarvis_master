@@ -96,6 +96,44 @@ def clear_embedding_cache() -> None:
     _embed_cache.clear()
 
 
+def _zero_vector() -> List[float]:
+    return [0.0] * _settings().ollama_embed_dim
+
+
+def _embed_one_uncached(text: str) -> List[float]:
+    s = _settings()
+    try:
+        resp = httpx.post(
+            f"{s.ollama_base_url}/api/embed",
+            json={"model": s.ollama_embed_model, "input": [text]},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings = data.get("embeddings") or data.get("embedding")
+        if embeddings and isinstance(embeddings[0], list):
+            return embeddings[0]
+        if embeddings and isinstance(embeddings, list):
+            return embeddings
+    except Exception as exc:
+        logger.warning("single embed via /api/embed failed: %s", exc)
+
+    try:
+        resp = httpx.post(
+            f"{s.ollama_base_url}/api/embeddings",
+            json={"model": s.ollama_embed_model, "prompt": text},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embedding = data.get("embedding")
+        if embedding:
+            return embedding
+    except Exception as exc:
+        logger.error("single embed fallback failed: %s", exc)
+    return _zero_vector()
+
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Embed batch of texts via Ollama nomic-embed-text. Returns list of float vectors.
 
@@ -140,15 +178,17 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         )
         # Fill misses with zero vectors (don't cache them — see _LRUEmbedCache.put)
         for slot_i in miss_indices:
-            results[slot_i] = [0.0] * s.ollama_embed_dim
+            results[slot_i] = _zero_vector()
         return results  # type: ignore[return-value]
     except Exception as e:
         logger.error(
-            "embed_texts failed (model=%s url=%s): %s",
-            s.ollama_embed_model, s.ollama_base_url, e,
+            "embed_texts batch failed (model=%s url=%s); retrying %d chunks individually: %s",
+            s.ollama_embed_model, s.ollama_base_url, len(miss_indices), e,
         )
         for slot_i in miss_indices:
-            results[slot_i] = [0.0] * s.ollama_embed_dim
+            emb = _embed_one_uncached(texts[slot_i])
+            results[slot_i] = emb
+            _embed_cache.put(texts[slot_i], emb)
         return results  # type: ignore[return-value]
 
 

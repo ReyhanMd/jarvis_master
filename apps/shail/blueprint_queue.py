@@ -163,6 +163,32 @@ def job_for_memory(memory_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def delete_jobs_for_memory(memory_id: str) -> None:
+    init_blueprint_queue_schema()
+    with _conn() as con:
+        con.execute("DELETE FROM blueprint_jobs WHERE memory_id = ?", (memory_id,))
+
+
+def reset_stale_running_jobs(*, older_than_seconds: int = 1800, limit: int = 100) -> int:
+    """Move old running jobs back to pending so the worker can retry them."""
+    init_blueprint_queue_schema()
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)).isoformat()
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT id FROM blueprint_jobs WHERE state = 'running' "
+            "AND updated_at <= ? ORDER BY updated_at LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        for job_id in ids:
+            con.execute(
+                "UPDATE blueprint_jobs SET state = 'pending', last_error = NULL, "
+                "next_attempt_at = ?, updated_at = ? WHERE id = ?",
+                (_now(), _now(), job_id),
+            )
+    return len(ids)
+
+
 # ── State transitions ────────────────────────────────────────────────────────
 
 def _mark_running(job_id: str) -> None:

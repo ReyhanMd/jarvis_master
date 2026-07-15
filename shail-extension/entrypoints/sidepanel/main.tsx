@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import {
   api, getApiKey, cleanContentForDisplay, formatFullInject,
   userFacingError, RouteCluster, SuggestedMemory, AscentSummary,
-  SystemStatus,
+  SystemStatus, LocalRAGStatus, PathOnboardingState,
 } from '../../src/lib/api';
 import { timeAgo, getSourceMeta } from '../../src/lib/utils';
 import type { MemoryRecord, SourceApp } from '../../src/types/contracts';
@@ -830,10 +830,216 @@ function OllamaRuntimeBadge({ apiKey }: { apiKey: string | null }) {
 
 // ─── Main sidepanel ───────────────────────────────────────────────────────────
 
+function LocalRAGStatusStrip({ apiKey }: { apiKey: string | null }) {
+  const [status, setStatus] = useState<LocalRAGStatus | null>(null);
+  const [error, setError] = useState('');
+
+  const refresh = useCallback(async () => {
+    if (!apiKey) { setStatus(null); return; }
+    try {
+      const next = await api.localRagStatus();
+      setStatus(next);
+      setError('');
+    } catch (err) {
+      setError(userFacingError(err));
+    }
+  }, [apiKey]);
+
+  useEffect(() => {
+    refresh();
+    const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener('shail:refresh', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('shail:refresh', refresh);
+    };
+  }, [refresh]);
+
+  if (!apiKey) return null;
+  if (error && !status) {
+    return (
+      <div style={{ margin: '0 0 8px', padding: '6px 8px', border: '1px solid #2a1515', borderRadius: 6, color: '#fca5a5', fontSize: 10, fontFamily: MONO }}>
+        LOCAL RAG · {error}
+      </div>
+    );
+  }
+  if (!status) return null;
+
+  const backlog = status.repair_backlog;
+  const repairCount = (backlog.raw_unembedded || 0)
+    + (backlog.raw_unblueprinted || 0)
+    + (backlog.stale_running_blueprint_jobs || 0)
+    + (backlog.vector_only_browser || 0);
+  const blocked = status.path_index.blocked_paths?.length ?? 0;
+  const files = status.path_index.total_files ?? 0;
+  const pending = status.blueprint_queue?.pending ?? 0;
+
+  return (
+    <div style={{ margin: '0 0 8px', padding: '6px 8px', background: '#080808', border: '1px solid #1b1b1b', borderRadius: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 9, fontFamily: MONO, color: '#777' }}>
+      <span style={{ color: repairCount ? '#f59e0b' : '#22c55e' }}>LOCAL RAG</span>
+      <span>{files} files</span>
+      <span>{blocked} blocked</span>
+      <span>{pending} blueprint queued</span>
+      <span>{repairCount} repair items</span>
+    </div>
+  );
+}
+
+function LocalFileOnboarding({
+  state,
+  onComplete,
+}: {
+  state: PathOnboardingState;
+  onComplete: (next: PathOnboardingState) => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(state.recommended_roots.slice(0, 3).map(r => r.path)),
+  );
+  const [customPath, setCustomPath] = useState('');
+  const [denyPath, setDenyPath] = useState('');
+  const [customRoots, setCustomRoots] = useState<string[]>([]);
+  const [denyPaths, setDenyPaths] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const toggle = (path: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const addCustom = () => {
+    const p = customPath.trim();
+    if (!p) return;
+    setCustomRoots(prev => prev.includes(p) ? prev : [...prev, p]);
+    setCustomPath('');
+  };
+
+  const addDeny = () => {
+    const p = denyPath.trim();
+    if (!p) return;
+    setDenyPaths(prev => prev.includes(p) ? prev : [...prev, p]);
+    setDenyPath('');
+  };
+
+  const complete = async (skip = false) => {
+    setBusy(true);
+    setError('');
+    try {
+      const approved = skip ? [] : [...selected, ...customRoots];
+      const next = await api.completePathOnboarding({
+        approved_roots: approved,
+        denied_paths: denyPaths,
+        scan_now: !skip,
+        acknowledged: true,
+        skipped: skip,
+        scan_mode: 'manual_approved_roots_only',
+      });
+      onComplete(next);
+    } catch (err) {
+      setError(userFacingError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: 18, background: '#000' }}>
+      <div style={{ maxWidth: 520, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, color: '#22c55e', fontFamily: MONO, letterSpacing: '0.12em', marginBottom: 8 }}>
+            FIRST SETUP
+          </div>
+          <h1 style={{ margin: 0, fontSize: 22, lineHeight: 1.2, color: '#f5f5f5' }}>
+            Choose what SHAIL can understand
+          </h1>
+        </div>
+
+        <div style={{ color: '#b5b5b5', fontSize: 13, lineHeight: 1.65 }}>
+          <p>SHAIL can help answer questions about files you choose, like PDFs, notes, spreadsheets, and project folders.</p>
+          <p>It does not need your whole computer.</p>
+          <p>SHAIL keeps a local index of file names, basic details, and short searchable snippets so it can find relevant files later.</p>
+          <p>When you ask a question, SHAIL may read matching files from folders you approved to build an answer.</p>
+          <p>You can remove folders or block private folders any time.</p>
+        </div>
+
+        <div style={{ border: '1px solid #1f1f1f', borderRadius: 8, overflow: 'hidden' }}>
+          <div style={{ padding: '10px 12px', borderBottom: '1px solid #1f1f1f', fontSize: 12, fontWeight: 700, color: '#eee' }}>
+            Recommended folders
+          </div>
+          {state.recommended_roots.length === 0 ? (
+            <div style={{ padding: 12, fontSize: 12, color: '#777' }}>No standard folders were found. Add a folder path below.</div>
+          ) : state.recommended_roots.map(root => (
+            <label key={root.path} style={{ display: 'flex', gap: 10, padding: '10px 12px', borderBottom: '1px solid #111', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={selected.has(root.path)}
+                onChange={() => toggle(root.path)}
+                style={{ marginTop: 2 }}
+              />
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: 12, color: '#f0f0f0', fontWeight: 650 }}>{root.label}</span>
+                <span style={{ display: 'block', fontSize: 10, color: '#777', marginTop: 2, wordBreak: 'break-word' }}>{root.path}</span>
+                <span style={{ display: 'block', fontSize: 11, color: '#999', marginTop: 4 }}>{root.reason}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#eee' }}>Add another folder</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input value={customPath} onChange={e => setCustomPath(e.target.value)} placeholder="/Users/name/Projects"
+              style={{ flex: 1, minWidth: 0, background: '#070707', border: '1px solid #222', color: '#eee', borderRadius: 6, padding: '8px 10px', fontSize: 12 }} />
+            <button onClick={addCustom} style={{ padding: '0 12px', border: '1px solid #2a2a2a', borderRadius: 6, background: '#111', color: '#ddd', cursor: 'pointer' }}>Add</button>
+          </div>
+          {customRoots.map(p => <div key={p} style={{ fontSize: 10, color: '#888', fontFamily: MONO, wordBreak: 'break-word' }}>+ {p}</div>)}
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#eee' }}>Block a private folder</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input value={denyPath} onChange={e => setDenyPath(e.target.value)} placeholder="/Users/name/Documents/Private"
+              style={{ flex: 1, minWidth: 0, background: '#070707', border: '1px solid #222', color: '#eee', borderRadius: 6, padding: '8px 10px', fontSize: 12 }} />
+            <button onClick={addDeny} style={{ padding: '0 12px', border: '1px solid #2a2a2a', borderRadius: 6, background: '#111', color: '#ddd', cursor: 'pointer' }}>Block</button>
+          </div>
+          {denyPaths.map(p => <div key={p} style={{ fontSize: 10, color: '#f59e0b', fontFamily: MONO, wordBreak: 'break-word' }}>blocked: {p}</div>)}
+        </div>
+
+        {error && <div style={{ color: '#ef4444', fontSize: 12 }}>{error}</div>}
+
+        <div style={{ display: 'flex', gap: 10, paddingTop: 4 }}>
+          <button
+            disabled={busy}
+            onClick={() => complete(false)}
+            style={{ flex: 1, padding: '10px 12px', borderRadius: 7, border: '1px solid rgba(34,197,94,0.45)', background: busy ? '#111' : 'rgba(34,197,94,0.14)', color: '#22c55e', fontWeight: 750, cursor: busy ? 'wait' : 'pointer' }}
+          >
+            {busy ? 'Starting…' : 'Start indexing selected folders'}
+          </button>
+          <button
+            disabled={busy}
+            onClick={() => complete(true)}
+            style={{ padding: '10px 12px', borderRadius: 7, border: '1px solid #222', background: 'transparent', color: '#777', cursor: busy ? 'wait' : 'pointer' }}
+          >
+            Skip for now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Sidepanel() {
   const [tab, setTab] = useState<'browse' | 'ask'>('browse');
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [pathOnboarding, setPathOnboarding] = useState<PathOnboardingState | null>(null);
+  const [onboardingLoading, setOnboardingLoading] = useState(true);
+  const [onboardingError, setOnboardingError] = useState('');
 
   useEffect(() => {
     getApiKey().then(k => { setApiKey(k); setAuthed(!!k); });
@@ -849,6 +1055,22 @@ function Sidepanel() {
     return () => chrome.storage.onChanged.removeListener(handler);
   }, []);
 
+  const refreshOnboarding = useCallback(async () => {
+    setOnboardingLoading(true);
+    setOnboardingError('');
+    try {
+      setPathOnboarding(await api.getPathOnboarding());
+    } catch (err) {
+      setOnboardingError(userFacingError(err));
+    } finally {
+      setOnboardingLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshOnboarding();
+  }, [refreshOnboarding]);
+
   return (
     <div style={{ width: '100%', height: '100vh', background: '#000', color: '#fff', display: 'flex', flexDirection: 'column', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', overflow: 'hidden' }}>
 
@@ -858,7 +1080,7 @@ function Sidepanel() {
           <span style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>SHAIL</span>
           <span style={{ fontSize: 9, color: '#22c55e', fontFamily: MONO, letterSpacing: '0.1em' }}>MEMORY</span>
           <OllamaRuntimeBadge apiKey={apiKey} />
-          <button onClick={() => document.dispatchEvent(new CustomEvent('shail:refresh'))} title="Refresh memories"
+          <button onClick={() => { document.dispatchEvent(new CustomEvent('shail:refresh')); refreshOnboarding(); }} title="Refresh memories"
             style={{ padding: '3px 8px', fontSize: 13, background: 'transparent', border: '1px solid #222', borderRadius: 5, color: '#666', cursor: 'pointer', lineHeight: 1 }}>↻</button>
           {!authed && (
             <button onClick={() => chrome.runtime.openOptionsPage()} style={{ padding: '3px 10px', fontSize: 10, background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 5, color: '#22c55e', cursor: 'pointer' }}>
@@ -874,9 +1096,20 @@ function Sidepanel() {
             </button>
           ))}
         </div>
+        {pathOnboarding?.completed && <LocalRAGStatusStrip apiKey={apiKey} />}
       </div>
 
-      {tab === 'browse' ? <BrowseTab apiKey={apiKey} /> : <AskTab apiKey={apiKey} />}
+      {onboardingLoading ? (
+        <div style={{ flex: 1, display: 'grid', placeItems: 'center', color: '#666', fontSize: 12 }}>Checking local file setup…</div>
+      ) : onboardingError ? (
+        <div style={{ flex: 1, display: 'grid', placeItems: 'center', color: '#777', fontSize: 12, padding: 20, textAlign: 'center' }}>
+          {onboardingError}
+        </div>
+      ) : pathOnboarding && !pathOnboarding.completed ? (
+        <LocalFileOnboarding state={pathOnboarding} onComplete={setPathOnboarding} />
+      ) : (
+        tab === 'browse' ? <BrowseTab apiKey={apiKey} /> : <AskTab apiKey={apiKey} />
+      )}
     </div>
   );
 }

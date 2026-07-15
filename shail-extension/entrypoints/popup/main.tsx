@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
-import { api, getApiKey, AscentSummary } from '../../src/lib/api';
+import { api, getApiKey, pingBackend, AscentSummary } from '../../src/lib/api';
 import { getSourceMeta, isDomainDenied } from '../../src/lib/utils';
 import type { CaptureSurfaceState, SourceApp, StatsResult, SitePolicy } from '../../src/types/contracts';
 import './style.css';
@@ -172,9 +172,7 @@ function Popup() {
     api.stats().then(setStats).catch(() => {});
 
     // Backend ping
-    fetch('http://localhost:8000/health', { signal: AbortSignal.timeout(2000) })
-      .then(r => setBackendOk(r.ok))
-      .catch(() => setBackendOk(false));
+    pingBackend().then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
 
     // Active ascent (best-effort)
     api.listAscents().then(r => {

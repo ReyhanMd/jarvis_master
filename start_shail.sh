@@ -47,6 +47,46 @@ wait_for_port() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+venv_broken() {
+  if [ ! -x "$PYTHON_BIN" ]; then
+    return 0
+  fi
+  if [ -f "$VENV/bin/pytest" ] && grep -q "/shail workspace /jarvis_master/" "$VENV/bin/pytest" 2>/dev/null; then
+    return 0
+  fi
+  if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.executable else 1)
+PY
+  then
+    return 0
+  fi
+  return 1
+}
+
+ensure_venv() {
+  if venv_broken; then
+    log "services_env is missing or points to an old repo path. Recreating it."
+    rm -rf "$VENV"
+    python3 -m venv "$VENV"
+  fi
+  if [ ! -x "$PYTHON_BIN" ]; then
+    log "Python venv is missing its interpreter at $PYTHON_BIN"
+    exit 1
+  fi
+  local missing
+  missing="$("$PYTHON_BIN" - <<'PY'
+import importlib.util
+mods = ["bcrypt", "fastapi", "uvicorn", "pydantic", "pytest", "httpx", "langchain_ollama"]
+print(" ".join(m for m in mods if importlib.util.find_spec(m) is None))
+PY
+)"
+  if [ -n "$missing" ]; then
+    log "Installing missing backend dependencies: $missing"
+    "$PYTHON_BIN" -m pip install -q -r "$ROOT/requirements.txt"
+  fi
+}
+
 # Load .env if present
 if [ -f "$ENV_FILE" ]; then
   log "Loading environment from .env"
@@ -57,15 +97,7 @@ else
   log "No .env found. Proceeding with current environment."
 fi
 
-# Ensure venv
-if [ ! -d "$VENV" ]; then
-  log "Creating Python venv at $VENV"
-  python3 -m venv "$VENV"
-fi
-if [ ! -x "$PYTHON_BIN" ]; then
-  log "Python venv is missing its interpreter at $PYTHON_BIN"
-  exit 1
-fi
+ensure_venv
 
 # Install dependencies if needed
 install_service() {
@@ -95,8 +127,10 @@ else
     export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
     export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
     export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-5m}"
-    ollama serve >"$LOG_DIR/ollama.log" 2>&1 &
-    echo $! >"$PID_DIR/ollama.pid"
+    nohup ollama serve </dev/null >"$LOG_DIR/ollama.log" 2>&1 &
+    OLLAMA_PID=$!
+    disown "$OLLAMA_PID" 2>/dev/null || true
+    echo $OLLAMA_PID >"$PID_DIR/ollama.pid"
     wait_for_port "Ollama" 11434
     log "Pulling required models (this may take a while on first run)"
     # Sprint 6: switched chat default to quantized Gemma 3 4B (Q4_K_M).
@@ -115,8 +149,10 @@ if check_port 6379; then
 else
   if command -v redis-server >/dev/null 2>&1; then
     log "Starting Redis"
-    redis-server >"$LOG_DIR/redis.log" 2>&1 &
-    echo $! >"$PID_DIR/redis.pid"
+    nohup redis-server </dev/null >"$LOG_DIR/redis.log" 2>&1 &
+    REDIS_PID=$!
+    disown "$REDIS_PID" 2>/dev/null || true
+    echo $REDIS_PID >"$PID_DIR/redis.pid"
     wait_for_port "Redis" 6379
   else
     log "Redis not installed. Please install (brew install redis)."
@@ -127,8 +163,10 @@ fi
 if [[ "$OSTYPE" == "darwin"* ]]; then
   log "Starting native services"
   if [ -f "$ROOT/run_native_services.sh" ]; then
-    "$ROOT/run_native_services.sh" >"$LOG_DIR/native.log" 2>&1 &
-    echo $! >"$PID_DIR/native.pid"
+    nohup "$ROOT/run_native_services.sh" </dev/null >"$LOG_DIR/native.log" 2>&1 &
+    NATIVE_PID=$!
+    disown "$NATIVE_PID" 2>/dev/null || true
+    echo $NATIVE_PID >"$PID_DIR/native.pid"
   else
     log "run_native_services.sh not found. Open Xcode projects manually if needed."
   fi
@@ -153,8 +191,10 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
       bash "$ROOT/scripts/install_watchdog.sh" >>"$LOG_DIR/memory_watchdog.log" 2>&1 || true
       if [ -f "$WATCHDOG_INSTALLED" ]; then
         log "Starting MemoryWatchdog (installed path)"
-        "$WATCHDOG_INSTALLED" >>"$LOG_DIR/memory_watchdog.log" 2>&1 &
-        echo $! >"$PID_DIR/memory_watchdog.pid"
+        nohup "$WATCHDOG_INSTALLED" </dev/null >>"$LOG_DIR/memory_watchdog.log" 2>&1 &
+        WATCHDOG_PID=$!
+        disown "$WATCHDOG_PID" 2>/dev/null || true
+        echo $WATCHDOG_PID >"$PID_DIR/memory_watchdog.pid"
       else
         log "MemoryWatchdog install failed — check $LOG_DIR/memory_watchdog.log"
       fi
@@ -173,8 +213,9 @@ start_service() {
   local max_wait="${5:-30}"
   log "Starting $name"
   pushd "$dir" >/dev/null
-  "$PYTHON_BIN" $cmd >"$LOG_DIR/${name}.log" 2>&1 &
+  PYTHONPATH="$ROOT" nohup "$PYTHON_BIN" "$cmd" </dev/null >"$LOG_DIR/${name}.log" 2>&1 &
   local pid=$!
+  disown "$pid" 2>/dev/null || true
   popd >/dev/null
   echo $pid >"$PID_DIR/${name}.pid"
   wait_for_port "$name" "$port" "$max_wait"
@@ -183,8 +224,9 @@ start_service() {
 # Start ui_twin as background process (no HTTP server, just WebSocket consumer)
 log "Starting ui_twin (background service)"
 pushd "$ROOT/services/ui_twin" >/dev/null
-"$PYTHON_BIN" service.py >"$LOG_DIR/ui_twin.log" 2>&1 &
+PYTHONPATH="$ROOT" nohup "$PYTHON_BIN" service.py </dev/null >"$LOG_DIR/ui_twin.log" 2>&1 &
 UI_TWIN_PID=$!
+disown "$UI_TWIN_PID" 2>/dev/null || true
 popd >/dev/null
 echo $UI_TWIN_PID >"$PID_DIR/ui_twin.pid"
 log "ui_twin started (PID: $UI_TWIN_PID) - runs in background, no HTTP port"
@@ -200,8 +242,9 @@ log "Starting Shail API"
 if check_port 8000; then
   log "Port 8000 already in use — assuming Shail API already running"
 else
-  PYTHONPATH="$ROOT" "$PYTHON_BIN" -m uvicorn apps.shail.main:app --host 127.0.0.1 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
+  PYTHONPATH="$ROOT" nohup "$PYTHON_BIN" -m uvicorn apps.shail.main:app --host 127.0.0.1 --port 8000 </dev/null >"$LOG_DIR/shail_api.log" 2>&1 &
   API_PID=$!
+  disown "$API_PID" 2>/dev/null || true
   echo $API_PID >"$PID_DIR/shail_api.pid"
   wait_for_port "Shail API" 8000
   if ! check_port 8000; then
@@ -211,12 +254,14 @@ else
     exit 1
   fi
   log "Shail API health: $(curl -s http://127.0.0.1:8000/health || echo unreachable)"
+  log "Shail API readiness: $(curl -s http://127.0.0.1:8000/system/readiness || echo unreachable)"
 fi
 
 # Start task worker
 log "Starting task worker"
-PYTHONPATH="$ROOT" "$PYTHON_BIN" -m shail.workers.task_worker >"$LOG_DIR/task_worker.log" 2>&1 &
+PYTHONPATH="$ROOT" nohup "$PYTHON_BIN" -m shail.workers.task_worker </dev/null >"$LOG_DIR/task_worker.log" 2>&1 &
 WORKER_PID=$!
+disown "$WORKER_PID" 2>/dev/null || true
 echo $WORKER_PID >"$PID_DIR/task_worker.pid"
 
 log "All services started. Logs in $LOG_DIR; PIDs in $PID_DIR."

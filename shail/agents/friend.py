@@ -20,7 +20,7 @@ from shail.tools.monitor import (
     wait_for_window
 )
 from langchain_ollama import ChatOllama
-from langchain.agents import create_react_agent, AgentExecutor
+from shail.agents.langchain_compat import make_react_executor
 from apps.shail.settings import get_settings
 
 
@@ -111,13 +111,12 @@ Remember: Execute as many tools as needed. NEVER say "one statement at a time" -
 Question: {input}
 Thought:{agent_scratchpad}""")
         
-        self.agent = create_react_agent(self.llm, self.tools, self.prompt)
-        self.executor = AgentExecutor(
-            agent=self.agent,
+        self.agent, self.executor = make_react_executor(
+            llm=self.llm,
             tools=self.tools,
-            verbose=True,
-            max_iterations=20,  # Allow more iterations for complex desktop automation
-            handle_parsing_errors=True
+            prompt=self.prompt,
+            agent_name=self.name,
+            max_iterations=20,
         )
 
     def plan(self, text: str) -> str:

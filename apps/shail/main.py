@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, AsyncIterator
 import asyncio
@@ -58,6 +58,7 @@ from apps.shail.auth_api import auth_router, get_current_user, get_user_or_local
 from apps.shail.auth_store import init_auth_db
 from apps.shail.memory_dashboard_api import dashboard_router
 from apps.shail.macos_memory_api import memory_router, path_idx_router
+from apps.shail.local_rag_api import local_rag_router
 from apps.shail.llm import call_llm
 from shail.core.task_classifier import classify
 import uuid
@@ -81,6 +82,19 @@ class HealthResponse(BaseModel):
     errors: List[str] = Field(default_factory=list)
 
 
+GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE = (
+    "Google OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+)
+
+
+def log_google_oauth_status() -> None:
+    settings = get_settings()
+    if settings.google_client_id and settings.google_client_secret:
+        logger.info("Google OAuth configured")
+        return
+    logger.warning(GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
+
+
 class ApprovalResponse(BaseModel):
     status: str
     message: str
@@ -97,6 +111,7 @@ class TaskQueuedResponse(BaseModel):
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
     settings = get_settings()
+    log_google_oauth_status()
     os.makedirs(os.path.dirname(settings.sqlite_path), exist_ok=True)
     try:
         init_auth_db()
@@ -164,6 +179,11 @@ async def lifespan(app: FastAPI):
         get_ingest_queue().start()
     except Exception as exc:
         logger.warning("IngestQueue start failed: %s", exc)
+    try:
+        from apps.shail.local_semantics_jobs import start_worker as start_semantic_worker
+        start_semantic_worker()
+    except Exception as exc:
+        logger.warning("Local semantic enrichment worker start failed: %s", exc)
 
     # Launch background async startup tasks
     asyncio.create_task(_startup_index_run())
@@ -196,35 +216,32 @@ async def _startup_index_run():
     try:
         from pathlib import Path
         from shail.memory.path_index import (
-            scan, ingest_spotlight_recent, _default_roots, backfill_snippets,
-            get_persisted_roots,
+            scan, ingest_spotlight_recent, backfill_snippets,
+            get_persisted_roots, get_active_scan_roots, onboarding_completed,
         )
         from shail.integrations.local.filesystem.adapter import get_adapter
         from apps.shail.auth_store import _conn as _auth_conn
 
         settings = get_settings()
-        default_roots = _default_roots()
         env_roots = [r for r in settings.scan_roots if r and Path(r).is_dir()]
         persisted_roots = []
         try:
             persisted_roots = get_persisted_roots(settings.path_index_db)
         except Exception:
             pass
-        # Merge all sources, deduplicate, preserve order.
-        seen: set = set()
-        roots: list = []
-        for r in env_roots + persisted_roots + default_roots:
-            if r not in seen:
-                seen.add(r)
-                roots.append(r)
+        try:
+            completed = onboarding_completed(settings.path_index_db)
+        except Exception:
+            completed = False
+        roots = get_active_scan_roots(settings.path_index_db, env_roots=env_roots)
         logger.info(
-            "Scan roots: %d env, %d persisted, %d default → %d total: %s",
-            len(env_roots), len(persisted_roots), len(default_roots), len(roots), roots,
+            "Scan roots: %d env, %d persisted, onboarding_completed=%s -> %d active: %s",
+            len(env_roots), len(persisted_roots), completed, len(roots), roots,
         )
 
         # 1. Bulk scan in thread
         file_count = await loop.run_in_executor(
-            None, lambda: scan(settings.path_index_db, roots=roots or None)
+            None, lambda: scan(settings.path_index_db, roots=roots)
         )
         logger.info("Startup path index walk complete: %d new/changed files", file_count)
 
@@ -238,13 +255,15 @@ async def _startup_index_run():
         except Exception as exc:
             logger.debug("snippet backfill skipped: %s", exc)
 
-        # 2. Spotlight (macOS)
+        # 2. Spotlight (macOS). Only run after local-file onboarding; Spotlight
+        # can otherwise discover files outside folders the user explicitly chose.
         try:
-            sl = await loop.run_in_executor(
-                None, lambda: ingest_spotlight_recent(settings.path_index_db, days=30, max_files=1000)
-            )
-            if sl:
-                logger.info("Spotlight added %d recently-modified files", sl)
+            if completed:
+                sl = await loop.run_in_executor(
+                    None, lambda: ingest_spotlight_recent(settings.path_index_db, days=30, max_files=1000)
+                )
+                if sl:
+                    logger.info("Spotlight added %d recently-modified files", sl)
         except Exception as exc:
             logger.debug("Spotlight ingest skipped: %s", exc)
 
@@ -300,8 +319,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS: pinned to known origins. allow_origins=["*"] paired with
 # allow_credentials=True is a CORS spec violation that some browsers reject.
-# Extension origins use chrome-extension:// scheme; allow_origin_regex covers
-# every install ID without enumerating them.
+# Extension origins vary by browser. Chrome and Brave use chrome-extension://,
+# Firefox uses moz-extension://, and Safari uses safari-web-extension://.
+# Keep this broad enough for local development without opening remote origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -312,9 +332,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
     ],
-    # Chrome extension IDs are 32 lowercase a-p chars (base-26); also allow
-    # any alphanumeric variant to future-proof Safari/Firefox extensions.
-    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
+    allow_origin_regex=r"^(chrome-extension|moz-extension|safari-web-extension|extension)://[a-zA-Z0-9._-]+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -334,6 +352,11 @@ app.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 app.include_router(dashboard_router, prefix="/api/v2", tags=["dashboard"])
 app.include_router(memory_router, prefix="/memory", tags=["memory"])
 app.include_router(path_idx_router, prefix="/path-index", tags=["path-index"])
+app.include_router(local_rag_router, prefix="/local-rag", tags=["local-rag"])
+# Dashboard-compatible alias. Older UI API groups live under /api/v2; keeping
+# this alias makes Graphify resilient when the dashboard and backend are served
+# through the same host/proxy.
+app.include_router(local_rag_router, prefix="/api/v2/local-rag", tags=["local-rag"])
 
 from apps.shail.system_api import system_router  # noqa: E402
 app.include_router(system_router, prefix="/system", tags=["system"])
@@ -361,6 +384,10 @@ if os.path.isdir(_UI_DIST):
         if full_path and candidate.is_file():
             return FileResponse(candidate)
         return FileResponse(base_dir / "index.html")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_dashboard_root():
+        return RedirectResponse(url="/dashboard")
 
 router = ShailCoreRouter()
 logger = logging.getLogger(__name__)
@@ -395,11 +422,16 @@ async def health() -> HealthResponse:
     ollama_reachable = False
 
     try:
-        from shail.memory.rag import _get_store
-        store = _get_store()
-        if hasattr(store, "collection"):
-            _ = store.collection.count()
-        chroma_ready = True
+        def _probe_chroma() -> bool:
+            from shail.memory.rag import _get_store
+            store = _get_store()
+            if hasattr(store, "collection"):
+                _ = store.collection.count()
+            return True
+
+        chroma_ready = await asyncio.wait_for(asyncio.to_thread(_probe_chroma), timeout=0.75)
+    except asyncio.TimeoutError:
+        errors.append("chroma: health check timed out")
     except Exception as exc:
         errors.append(f"chroma: {exc}")
 
@@ -842,6 +874,16 @@ class LocalFileSource(BaseModel):
     snippet: str = ""
     file_type: str = ""
     score: float = 0.0
+    graph_reason: Optional[str] = None
+    evidence_reason: Optional[str] = None
+    confidence: Optional[str] = None
+    is_latest_candidate: bool = False
+    duplicate_of: Optional[str] = None
+    answer_confidence: Optional[str] = None
+    evidence_bundle_id: Optional[str] = None
+    resolved_claim_id: Optional[str] = None
+    conflict_group_id: Optional[str] = None
+    warning_type: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -899,6 +941,16 @@ async def unified_query(
         LocalFileSource(
             id=f.id, title=f.title, path=f.path, snippet=f.snippet,
             file_type=f.file_type, score=f.score,
+            graph_reason=f.graph_reason,
+            evidence_reason=f.evidence_reason,
+            confidence=f.confidence,
+            is_latest_candidate=f.is_latest_candidate,
+            duplicate_of=f.duplicate_of,
+            answer_confidence=f.answer_confidence,
+            evidence_bundle_id=f.evidence_bundle_id,
+            resolved_claim_id=f.resolved_claim_id,
+            conflict_group_id=f.conflict_group_id,
+            warning_type=f.warning_type,
         )
         for f in (local_files or [])
     ]
@@ -951,7 +1003,15 @@ async def stream_query(
     web_results = [{"title": w.title, "url": w.url, "snippet": w.snippet} for w in (web_sources or [])]
     local_file_payload = [
         {"id": f.id, "title": f.title, "path": f.path, "snippet": f.snippet,
-         "file_type": f.file_type, "score": f.score}
+         "file_type": f.file_type, "score": f.score,
+         "graph_reason": f.graph_reason, "evidence_reason": f.evidence_reason,
+         "confidence": f.confidence, "is_latest_candidate": f.is_latest_candidate,
+         "duplicate_of": f.duplicate_of,
+         "answer_confidence": f.answer_confidence,
+         "evidence_bundle_id": f.evidence_bundle_id,
+         "resolved_claim_id": f.resolved_claim_id,
+         "conflict_group_id": f.conflict_group_id,
+         "warning_type": f.warning_type}
         for f in (local_files or [])
     ]
 

@@ -127,6 +127,19 @@ class Settings(BaseModel):
     shail_local_files_snippet_chars:   int   = Field(default=int(os.getenv("SHAIL_LOCAL_FILES_SNIPPET_CHARS", "1500")))
     shail_local_files_read_cap_bytes:  int   = Field(default=int(os.getenv("SHAIL_LOCAL_FILES_READ_CAP_BYTES", "25000000")))
     shail_local_files_min_score:       float = Field(default=float(os.getenv("SHAIL_LOCAL_FILES_MIN_SCORE", "0.05")))
+    # Phase 5: opt-in local semantic enrichment through Ollama. Deterministic
+    # extraction remains the default and fallback.
+    shail_local_semantic_llm:           bool  = Field(default=os.getenv("SHAIL_LOCAL_SEMANTIC_LLM", "false").lower() == "true")
+    shail_local_semantic_model:         str   = Field(default=os.getenv("SHAIL_LOCAL_SEMANTIC_MODEL", os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b-it-q4_K_M")))
+    shail_local_semantic_context_tokens:int   = Field(default=int(os.getenv("SHAIL_LOCAL_SEMANTIC_CONTEXT_TOKENS", "32768")))
+    shail_local_semantic_max_file_chars:int   = Field(default=int(os.getenv("SHAIL_LOCAL_SEMANTIC_MAX_FILE_CHARS", "250000")))
+    shail_local_semantic_chunk_overlap_chars:int = Field(default=int(os.getenv("SHAIL_LOCAL_SEMANTIC_CHUNK_OVERLAP_CHARS", "1200")))
+    shail_local_semantic_max_concurrent:int   = Field(default=int(os.getenv("SHAIL_LOCAL_SEMANTIC_MAX_CONCURRENT", "1")))
+    shail_local_semantic_max_attempts:  int   = Field(default=int(os.getenv("SHAIL_LOCAL_SEMANTIC_MAX_ATTEMPTS", "3")))
+    # Phase 9: optional local Ollama wording over already-built intelligence
+    # packets. Deterministic packet construction remains the default.
+    shail_local_intelligence_llm:       bool  = Field(default=os.getenv("SHAIL_LOCAL_INTELLIGENCE_LLM", "false").lower() == "true")
+    shail_local_intelligence_model:     str   = Field(default=os.getenv("SHAIL_LOCAL_INTELLIGENCE_MODEL", os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b-it-q4_K_M")))
     # Plan Part B7: blueprint quality threshold for auto-redact gate (0.0–1.0).
     blueprint_quality_threshold: float = Field(default=float(os.getenv("SHAIL_BLUEPRINT_QUALITY_THRESHOLD", "0.4")))
     auto_redact_default:        bool = Field(default=os.getenv("SHAIL_AUTO_REDACT_DEFAULT", "false").lower() == "true")

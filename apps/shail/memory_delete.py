@@ -115,4 +115,18 @@ def delete_memory_everywhere(
     except Exception as exc:
         logger.warning("blueprint cascade delete failed for %s: %s", logical_id, exc)
 
+    try:
+        from apps.shail.pipeline_status import delete_status
+
+        delete_status(logical_id)
+    except Exception as exc:
+        logger.warning("pipeline status cascade delete failed for %s: %s", logical_id, exc)
+
+    try:
+        from apps.shail.blueprint_queue import delete_jobs_for_memory
+
+        delete_jobs_for_memory(logical_id)
+    except Exception as exc:
+        logger.warning("blueprint job cascade delete failed for %s: %s", logical_id, exc)
+
     return logical_id, ids

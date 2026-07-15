@@ -4,7 +4,7 @@ from shail.agents.base import AbstractAgent
 from shail.tools.os import open_app, close_app, run_command
 from shail.tools.files import write_text_file, read_text_file, list_files, delete_file, create_directory
 from langchain_ollama import ChatOllama
-from langchain.agents import create_react_agent, AgentExecutor
+from shail.agents.langchain_compat import make_react_executor
 from apps.shail.settings import get_settings
 
 
@@ -68,13 +68,12 @@ Remember: Execute as many tools as needed. NEVER say "one statement at a time" -
 Question: {input}
 Thought:{agent_scratchpad}""")
         
-        self.agent = create_react_agent(self.llm, self.tools, self.prompt)
-        self.executor = AgentExecutor(
-            agent=self.agent,
+        self.agent, self.executor = make_react_executor(
+            llm=self.llm,
             tools=self.tools,
-            verbose=True,
+            prompt=self.prompt,
+            agent_name=self.name,
             max_iterations=15,
-            handle_parsing_errors=True
         )
 
     def plan(self, text: str) -> str:
@@ -95,5 +94,4 @@ Thought:{agent_scratchpad}""")
         except Exception as e:
             error_msg = f"CodeAgent execution error: {str(e)}"
             return error_msg, []
-
 

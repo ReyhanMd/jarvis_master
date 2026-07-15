@@ -246,6 +246,7 @@ class FileSystemAdapter:
         self.name = "filesystem"
         self.category = "local"
         self._watches: Dict[str, _ActiveWatch] = {}  # key = f"{user_id}::{path}"
+        self._path_watches: Dict[str, str] = {}  # abs_path -> owner key
         self._lock = threading.Lock()
 
     # ── Read-only helpers (kept from original stub) ──
@@ -279,11 +280,15 @@ class FileSystemAdapter:
         with self._lock:
             if key in self._watches:
                 return {"ok": True, "path": abs_path, "status": "already_watching"}
+            if abs_path in self._path_watches:
+                add_watch_row(user_id, abs_path)
+                return {"ok": True, "path": abs_path, "status": "already_watching"}
             handler = _ShailEventHandler(user_id, abs_path)
             observer = Observer()
             observer.schedule(handler, abs_path, recursive=True)
             observer.start()
             self._watches[key] = _ActiveWatch(observer=observer, handler=handler)
+            self._path_watches[abs_path] = key
         add_watch_row(user_id, abs_path)
         logger.info("filesystem watch started: user=%s path=%s", user_id, abs_path)
         return {"ok": True, "path": abs_path, "status": "watching"}
@@ -293,6 +298,8 @@ class FileSystemAdapter:
         key = f"{user_id}::{abs_path}"
         with self._lock:
             active = self._watches.pop(key, None)
+            if active is not None:
+                self._path_watches.pop(abs_path, None)
         if active is not None:
             try:
                 active.observer.stop()
@@ -328,6 +335,7 @@ class FileSystemAdapter:
                     pass
         with self._lock:
             self._watches.clear()
+            self._path_watches.clear()
 
     def get_capabilities(self) -> Dict[str, object]:
         return {

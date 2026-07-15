@@ -27,6 +27,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$ROOT/logs"
 PID_DIR="$ROOT/run"
+VENV="$ROOT/services_env"
+PYTHON_BIN="$VENV/bin/python3"
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
 if [ -t 1 ]; then
@@ -41,6 +43,72 @@ log()  { printf '%s[shail]%s %s\n' "$C_DIM" "$C_RST" "$*"; }
 ok()   { printf '%s✓%s %s\n' "$C_OK" "$C_RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$C_WARN" "$C_RST" "$*"; }
 err()  { printf '%s✗%s %s\n' "$C_ERR" "$C_RST" "$*" >&2; }
+
+REQUIRED_PY_DEPS=(bcrypt fastapi uvicorn pydantic pytest httpx langchain_ollama)
+
+venv_broken() {
+  if [ ! -x "$PYTHON_BIN" ]; then
+    return 0
+  fi
+  if [ -f "$VENV/bin/pytest" ] && grep -q "/shail workspace /jarvis_master/" "$VENV/bin/pytest" 2>/dev/null; then
+    return 0
+  fi
+  if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.executable else 1)
+PY
+  then
+    return 0
+  fi
+  return 1
+}
+
+ensure_venv() {
+  if venv_broken; then
+    warn "services_env is missing or points to an old repo path — recreating it"
+    rm -rf "$VENV"
+    python3 -m venv "$VENV" || return 1
+  fi
+  if [ ! -x "$PYTHON_BIN" ]; then
+    err "Python venv is missing its interpreter at $PYTHON_BIN"
+    return 1
+  fi
+  local missing
+  missing="$("$PYTHON_BIN" - <<'PY'
+import importlib.util
+mods = ["bcrypt", "fastapi", "uvicorn", "pydantic", "pytest", "httpx", "langchain_ollama"]
+print(" ".join(m for m in mods if importlib.util.find_spec(m) is None))
+PY
+)"
+  if [ -n "$missing" ]; then
+    warn "installing missing backend dependencies: $missing"
+    "$PYTHON_BIN" -m pip install -q -r "$ROOT/requirements.txt" || return 1
+  fi
+}
+
+python_dep_report() {
+  local py="${1:-$PYTHON_BIN}"
+  if [ ! -x "$py" ]; then
+    printf '  python: %s%s missing%s\n' "$C_ERR" "$py" "$C_RST"
+    return 1
+  fi
+  "$py" - <<'PY'
+import importlib.util, sys
+print(f"  python: {sys.executable}")
+for mod in ["bcrypt", "fastapi", "uvicorn", "pydantic", "pytest", "httpx", "langchain_ollama"]:
+    print(f"  {mod}: {'ok' if importlib.util.find_spec(mod) else 'missing'}")
+PY
+}
+
+backend_import_check() {
+  "$PYTHON_BIN" - <<'PY'
+import importlib
+mods = ["apps.shail.main", "apps.shail.auth_store", "apps.shail.local_rag_api", "apps.shail.system_api"]
+for mod in mods:
+    importlib.import_module(mod)
+    print(f"  import {mod}: ok")
+PY
+}
 
 # Each entry: name|port|stop_priority(1=first to die, low to high = deps last)
 SERVICES=(
@@ -173,6 +241,7 @@ cmd_stop() {
 }
 
 cmd_start() {
+  ensure_venv || return 1
   if [ -x "$ROOT/start_shail.sh" ]; then
     log "starting SHAIL stack via start_shail.sh"
     "$ROOT/start_shail.sh"
@@ -281,18 +350,19 @@ cmd_api_restart() {
   fi
 
   # Start fresh
-  local venv="$ROOT/services_env"
-  local py="$venv/bin/python3"
-  [ -x "$py" ] || py="$venv/bin/python3.9"
-  PYTHONPATH="$ROOT" "$py" -m uvicorn apps.shail.main:app \
+  ensure_venv || return 1
+  local py="$PYTHON_BIN"
+  [ -x "$py" ] || py="$VENV/bin/python3.9"
+  PYTHONPATH="$ROOT" nohup "$py" -m uvicorn apps.shail.main:app \
     --host 127.0.0.1 --port 8000 \
-    >"$LOG_DIR/shail_api.log" 2>&1 &
+    </dev/null >"$LOG_DIR/shail_api.log" 2>&1 &
   local new_pid=$!
+  disown "$new_pid" 2>/dev/null || true
   echo "$new_pid" >"$pid_file"
   log "shail_api starting (pid $new_pid) — waiting for :8000"
 
   local waited=0
-  until port_pid 8000 >/dev/null 2>&1 || [ "$waited" -ge 20 ]; do
+  until [ -n "$(port_pid 8000)" ] || [ "$waited" -ge 20 ]; do
     sleep 1; waited=$((waited + 1)); printf "."
   done
   echo
@@ -329,6 +399,16 @@ cmd_health() {
     fi
   done
   echo
+  echo "=== Python environment ==="
+  python_dep_report "$PYTHON_BIN" || true
+  echo
+  echo "=== Backend imports ==="
+  if [ -x "$PYTHON_BIN" ]; then
+    backend_import_check 2>&1 || true
+  else
+    echo "  ERROR: missing $PYTHON_BIN"
+  fi
+  echo
   echo "=== Backend health ==="
   python3 -c "
 import urllib.request, json, sys
@@ -341,6 +421,102 @@ except Exception as e:
     print(f'  ERROR: {e}', file=sys.stderr)
     sys.exit(1)
 " 2>&1
+  echo
+  echo "=== Backend readiness ==="
+  python3 -c "
+import urllib.request, json, sys
+try:
+    r = urllib.request.urlopen('http://127.0.0.1:8000/system/readiness', timeout=4)
+    d = json.loads(r.read())
+    print(f'  status: {d.get(\"status\")}')
+    for name, check in (d.get('checks') or {}).items():
+        print(f'  {name}: {\"ok\" if check.get(\"ok\") else \"failed\"}')
+        if check.get('error'):
+            print(f'    error: {check.get(\"error\")}')
+        if check.get('missing'):
+            print(f'    missing: {\", \".join(check.get(\"missing\") or [])}')
+except Exception as e:
+    print(f'  ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>&1
+}
+
+cmd_doctor() {
+  local failed=0
+  printf '%s%s%s\n' "$C_BOLD" "SHAIL doctor" "$C_RST"
+
+  echo "=== Venv ==="
+  if ensure_venv; then ok "services_env ready"; else failed=1; fi
+  python_dep_report "$PYTHON_BIN" || failed=1
+
+  echo
+  echo "=== Backend import ==="
+  if backend_import_check; then ok "backend imports"; else failed=1; fi
+
+  echo
+  echo "=== Live endpoints ==="
+  if ! curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+    warn "backend not reachable — starting shail_api for doctor"
+    if ! cmd_api_restart; then
+      failed=1
+    fi
+  elif ! curl -fsS --max-time 2 "http://127.0.0.1:8000/system/readiness" >/dev/null 2>&1; then
+    warn "backend is running old routes — restarting shail_api for doctor"
+    if ! cmd_api_restart; then
+      failed=1
+    fi
+  fi
+  for url in \
+    "http://127.0.0.1:8000/health" \
+    "http://127.0.0.1:8000/system/readiness" \
+    "http://127.0.0.1:8000/local-rag/status"; do
+    local extra=""
+    [ "$url" = "http://127.0.0.1:8000/local-rag/status" ] && extra="401"
+    local final_code=""
+    if final_code="$(endpoint_ready "$url" "$extra")"; then
+      ok "$url"
+    else
+      warn "$url not reachable (HTTP ${final_code:-000})"
+      failed=1
+    fi
+  done
+
+  echo
+  echo "=== UI builds ==="
+  if (cd "$ROOT/apps/shail-ui" && npm run build >/dev/null); then
+    ok "dashboard build"
+  else
+    failed=1
+    err "dashboard build failed"
+  fi
+  if (cd "$ROOT/shail-extension" && npm run build >/dev/null); then
+    ok "extension build"
+  else
+    failed=1
+    err "extension build failed"
+  fi
+
+  if [ "$failed" -eq 0 ]; then
+    ok "doctor passed"
+  else
+    err "doctor found issues"
+  fi
+  return "$failed"
+}
+
+endpoint_ready() {
+  local url="$1"
+  local allowed_extra="${2:-}"
+  local code=""
+  for _ in 1 2 3 4 5 6 7 8; do
+    code="$(curl -sS --max-time 4 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+    if [ "$code" = "200" ] || { [ -n "$allowed_extra" ] && [ "$code" = "$allowed_extra" ]; }; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf '%s' "$code"
+  return 1
 }
 
 case "${1:-}" in
@@ -349,6 +525,7 @@ case "${1:-}" in
   restart)         cmd_restart ;;
   api|api-restart) cmd_api_restart ;;
   health|h)        cmd_health ;;
+  doctor)          cmd_doctor ;;
   status|st)       cmd_status ;;
   logs)            cmd_logs "${2:-}" ;;
   clean)           cmd_clean ;;
@@ -362,6 +539,7 @@ Commands:
   restart            Stop then start (full stack, ~30s)
   api                Fast backend-only restart (~4s). Use during development.
   health             Print live health status of all services
+  doctor             Verify venv, imports, live endpoints, and UI builds
   status             Show running services and ports
   logs <service>     Tail logs/<service>.log
   clean              Stop and delete stale PID files

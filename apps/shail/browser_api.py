@@ -50,13 +50,20 @@ from apps.shail.source_normalization import (
     is_browser_memory,
     normalize_browser_metadata,
 )
+from apps.shail.browser_memory_model import (
+    NS_BROWSER as CANONICAL_NS_BROWSER,
+    find_latest_capture,
+    list_records as list_browser_memory_records,
+    search_records as search_browser_memory_records,
+    visible_namespaces as browser_visible_namespaces,
+)
 
 logger = logging.getLogger(__name__)
 
 browser_router = APIRouter()
 
 # ── Namespace for all browser extension captures ───────────────────────────
-NS_BROWSER = "browser_memory"  # legacy / anonymous namespace
+NS_BROWSER = CANONICAL_NS_BROWSER  # legacy / anonymous namespace
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -821,136 +828,30 @@ async def search_memories(
     Empty query → browse mode: returns all records sorted by timestamp (newest first).
     Non-empty query → semantic search via Gemini embeddings + ChromaDB KNN.
     """
-    store = _get_store()
     namespace = _get_namespace(credentials)
-
+    namespaces = browser_visible_namespaces(namespace)
     if not req.query.strip():
-        # ── Browse mode: list all records visible to this user ────────────
-        # Signed-in users see their namespace AND the anonymous namespace
-        # (pre-login captures) until they claim them via /claim-anonymous.
-        # Anonymous users see only browser_memory.
-        try:
-            if hasattr(store, "collection"):  # ChromaVectorStore
-                # Single-namespace browse: only the authenticated user's namespace
-                items: list[MemoryItem] = []
-                seen_ids: set = set()
-                try:
-                    result = store.collection.get(
-                        where={"namespace": namespace},
-                        include=["documents", "metadatas"],
-                        limit=5000,
-                    )
-                except Exception as ns_exc:
-                    logger.warning("Browse namespace %s failed: %s", namespace, ns_exc)
-                    result = {"ids": [], "documents": [], "metadatas": []}
+        all_records = list_browser_memory_records(
+            namespaces,
+            limit=5000,
+            after=req.after,
+            source_app=req.sourceApp,
+        )
+        items = [
+            MemoryItem(**r.to_extension_item(include_content=False))
+            for r in all_records[: req.k]
+        ]
+        return SearchResponse(items=items, total=len(all_records))
 
-                for rid, doc, meta in zip(
-                    result.get("ids", []),
-                    result.get("documents", []),
-                    result.get("metadatas", []),
-                ):
-                    meta = meta or {}
-                    if not is_browser_memory(meta, doc or ""):
-                        continue
-                    meta = normalize_browser_metadata(meta, doc or "")
-                    logical_id = _logical_record_id(rid, meta)
-                    if logical_id not in seen_ids:
-                        seen_ids.add(logical_id)
-                        items.append(_meta_to_item(logical_id, doc or "", 0.0, meta))
-
-                try:
-                    from apps.shail import raw_transcripts as _rt
-                    for raw in _rt.list_recent(namespace=namespace, limit=5000, after=req.after):
-                        raw_id = raw.get("memory_id")
-                        if not raw_id or raw_id in seen_ids:
-                            continue
-                        if not is_browser_memory(raw.get("metadata") or {}, raw.get("content") or ""):
-                            continue
-                        seen_ids.add(raw_id)
-                        items.append(_raw_transcript_to_item(raw))
-                except Exception as raw_exc:
-                    logger.warning("Raw transcript browse fallback failed: %s", raw_exc)
-
-                if req.after:
-                    items = [i for i in items if i.timestamp >= req.after]
-                if req.sourceApp:
-                    items = [i for i in items if i.sourceApp == req.sourceApp]
-                items.sort(key=lambda x: x.timestamp, reverse=True)
-                return SearchResponse(items=items[: req.k], total=len(items))
-            else:
-                try:
-                    from apps.shail import raw_transcripts as _rt
-                    raw_items = [
-                        _raw_transcript_to_item(raw)
-                        for raw in _rt.list_recent(namespace=namespace, limit=req.k, after=req.after)
-                        if is_browser_memory(raw.get("metadata") or {}, raw.get("content") or "")
-                    ]
-                    if req.sourceApp:
-                        raw_items = [i for i in raw_items if i.sourceApp == req.sourceApp]
-                    return SearchResponse(items=raw_items[: req.k], total=len(raw_items))
-                except Exception as raw_exc:
-                    logger.warning("Raw transcript browse fallback failed: %s", raw_exc)
-                    return SearchResponse(items=[], total=0)
-        except Exception as exc:
-            logger.error("Browse failed: %s", exc)
-            return SearchResponse(items=[], total=0)
-
-    ranked: Dict[str, tuple[MemoryItem, float]] = {}
-    terms = _query_terms(req.query)
-    namespaces = [namespace]
-    if namespace != NS_BROWSER:
-        namespaces.append(NS_BROWSER)
-
-    # Lexical search is the guaranteed path. It searches raw transcript rows and
-    # vector metadata/content directly, so exact titles, facts, and numbers work
-    # even before embeddings finish or when the embedder is offline.
-    for ns in namespaces:
-        try:
-            for record_id, record in _collect_user_capture_records(ns).items():
-                content = record.get("content") or ""
-                metadata = normalize_browser_metadata(record.get("metadata") or {}, content)
-                lexical = _lexical_score_capture(req.query, terms, content, metadata)
-                if lexical <= 0:
-                    continue
-                existing = ranked.get(record_id)
-                item = existing[0] if existing else _meta_to_item(record_id, content, 0.0, metadata)
-                combined = (existing[1] if existing else 0.0) + lexical
-                item.score = round(combined, 4)
-                ranked[record_id] = (item, combined)
-        except Exception as exc:
-            logger.warning("Lexical search merge failed for %s: %s", ns, exc)
-
-    # Semantic search is an optional boost, not the source of truth. If it fails,
-    # exact/keyword search still returns usable results.
-    semantic_k = min(max(req.k * 3, 50), 100)
-    for ns in namespaces:
-        try:
-            results = rag_search(query=req.query, k=semantic_k, namespace=ns)
-        except Exception as exc:
-            logger.warning("Semantic search failed for %s: %s", ns, exc)
-            continue
-        for content, dist_score, metadata in results:
-            if not is_browser_memory(metadata or {}, content):
-                continue
-            metadata = normalize_browser_metadata(metadata or {}, content)
-            record_id = metadata.get("customId") or metadata.get("id") or str(uuid.uuid4())
-            similarity = max(0.0, 1.0 - dist_score / 2.0)
-            existing = ranked.get(record_id)
-            item = existing[0] if existing else _meta_to_item(record_id, content, similarity, metadata)
-            combined = (existing[1] if existing else 0.0) + similarity
-            item.score = round(combined, 4)
-            ranked[record_id] = (item, combined)
-
-    items = [item for item, _score in ranked.values()]
-
-    # Sort by relevance then date-filter
-    items.sort(key=lambda x: x.score or 0.0, reverse=True)
-    if req.after:
-        items = [i for i in items if i.timestamp >= req.after]
-    if req.sourceApp:
-        items = [i for i in items if i.sourceApp == req.sourceApp]
-
-    return SearchResponse(items=items[: req.k], total=len(items))
+    records = search_browser_memory_records(
+        namespaces,
+        query=req.query,
+        k=req.k,
+        after=req.after,
+        source_app=req.sourceApp,
+    )
+    items = [MemoryItem(**r.to_extension_item(include_content=False)) for r in records]
+    return SearchResponse(items=items, total=len(records))
 
 
 @browser_router.get("/memories/{memory_id:path}", response_model=MemoryItem)
@@ -964,68 +865,10 @@ async def get_memory(
     caller's namespace (user_{user_id} for authenticated, browser_memory for
     anonymous). Prevents cross-user false-positive dedup in the popup.
     """
-    store = _get_store()
     primary_ns = _get_namespace(credentials)
-    # Allow authenticated users to also see memories captured before they
-    # signed in (anonymous browser_memory namespace).
-    allowed_ns: set[str] = {primary_ns}
-    if primary_ns != NS_BROWSER:
-        allowed_ns.add(NS_BROWSER)
-
-    if hasattr(store, "collection"):
-        try:
-            result = store.collection.get(
-                ids=[memory_id],
-                include=["documents", "metadatas"],
-            )
-            ids = result.get("ids", [])
-            if ids:
-                doc = (result.get("documents") or [""])[0] or ""
-                meta = (result.get("metadatas") or [{}])[0] or {}
-                if meta.get("namespace", NS_BROWSER) not in allowed_ns:
-                    raise HTTPException(status_code=404, detail="Memory not found")
-                if not is_browser_memory(meta, doc):
-                    raise HTTPException(status_code=404, detail="Memory not found")
-                return _meta_to_item(ids[0], doc, 0.0, meta, include_content=True)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("get_memory failed for %s: %s", memory_id, exc)
-        try:
-            result = store.collection.get(
-                where={"customId": memory_id},
-                include=["documents", "metadatas"],
-            )
-            ids = result.get("ids", []) or []
-            if ids:
-                rows = list(zip(
-                    ids,
-                    result.get("documents", []) or [],
-                    result.get("metadatas", []) or [],
-                ))
-                # Namespace check — any chunk's namespace must be in allowed_ns
-                first_meta = (rows[0][2] or {}) if rows else {}
-                if first_meta.get("namespace", NS_BROWSER) not in allowed_ns:
-                    raise HTTPException(status_code=404, detail="Memory not found")
-                if not is_browser_memory(first_meta, rows[0][1] if rows else ""):
-                    raise HTTPException(status_code=404, detail="Memory not found")
-                rows.sort(key=lambda row: int((row[2] or {}).get("chunk_index", 0)))
-                content = "\n\n".join((doc or "") for _, doc, _ in rows)
-                meta = rows[0][2] or {}
-                return _meta_to_item(memory_id, content, 0.0, meta, include_content=True)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("get_memory chunk fallback failed for %s: %s", memory_id, exc)
-    try:
-        from apps.shail import raw_transcripts as _rt
-        raw = _rt.get(memory_id)
-        if raw and raw.get("namespace") in allowed_ns:
-            if not is_browser_memory(raw.get("metadata") or {}, raw.get("content") or ""):
-                raise HTTPException(status_code=404, detail="Memory not found")
-            return _raw_transcript_to_item(raw, include_content=True)
-    except Exception as exc:
-        logger.error("get_memory raw transcript fallback failed for %s: %s", memory_id, exc)
+    record = find_latest_capture(browser_visible_namespaces(primary_ns), memory_id=memory_id)
+    if record:
+        return MemoryItem(**record.to_extension_item(include_content=True))
     raise HTTPException(status_code=404, detail="Memory not found")
 
 
@@ -1058,6 +901,17 @@ async def delete_memory(
             if not raw or raw.get("namespace") not in namespaces:
                 raise HTTPException(status_code=404, detail="Memory not found")
             _rt.delete(memory_id)
+            try:
+                from apps.shail.blueprints import delete_blueprint
+                from apps.shail.pipeline_status import delete_status
+                from apps.shail.blueprint_queue import delete_jobs_for_memory
+                from apps.shail.capture_store import delete_memory_state
+                delete_blueprint(memory_id)
+                delete_status(memory_id)
+                delete_jobs_for_memory(memory_id)
+                delete_memory_state(memory_id)
+            except Exception as cleanup_exc:
+                logger.warning("raw-only delete cleanup failed for %s: %s", memory_id, cleanup_exc)
             logical_id = memory_id
         log_user_id = primary_ns.removeprefix("user_") if primary_ns.startswith("user_") else None
         write_event("PRUNE", f"memory deleted: {logical_id[:12]}",
@@ -1183,55 +1037,51 @@ async def get_capture_state(
 ) -> dict:
     """Single source of truth for extension/dashboard capture surfaces."""
     namespace = _get_namespace(credentials)
-    from apps.shail import raw_transcripts as _rt
-    from apps.shail import pipeline_status as _ps
-    from apps.shail.blueprint_queue import job_for_memory
-
-    rt = _rt.find_latest(
+    record = find_latest_capture(
+        browser_visible_namespaces(namespace),
         memory_id=memory_id,
         conversation_id=conversation_id,
         source_url=source_url,
-        namespace=namespace,
     )
-    if not rt:
+    if not record:
         raise HTTPException(status_code=404, detail="Capture not found")
 
-    mid = rt["memory_id"]
-    metadata = rt.get("metadata") or {}
-    pipeline = _ps.get_status(mid)
-    bp = bp_get(mid)
-    job = job_for_memory(mid)
-    retention_policy = rt.get("retention_policy") or "keep_raw"
-    if rt.get("transcript_deleted_at"):
-        retention_policy = "transcript_deleted"
+    mid = record.id
+    pipeline = record.pipeline or {}
+    blueprint = record.blueprint or {"present": False}
+    capture_policy = (
+        record.metadata.get("capture_policy")
+        or record.metadata.get("capturePolicy")
+        or ("ended" if record.state == "transcript_deleted" else "capturing")
+    )
     return {
         "memory_id": mid,
-        "conversation_id": metadata.get("conversationId") or conversation_id,
-        "source_app": metadata.get("sourceApp") or rt.get("content_type") or "web",
-        "source_url": metadata.get("sourceUrl") or source_url or "",
-        "title": metadata.get("title") or "",
-        "capture_mode": rt.get("capture_mode") or metadata.get("capture_mode") or "active",
-        "capture_source": metadata.get("capture_source") or "",
-        "capture_policy": "capturing",
-        "retention_policy": retention_policy,
+        "conversation_id": record.conversationId or conversation_id,
+        "source_app": record.sourceApp,
+        "source_url": record.sourceUrl or source_url or "",
+        "title": record.title or "",
+        "capture_mode": record.captureMode,
+        "capture_source": record.captureSource,
+        "capture_policy": capture_policy,
+        "retention_policy": record.retentionPolicy,
         "pipeline": {
             "current_stage": pipeline.get("current_stage"),
             "current_state": pipeline.get("current_state"),
             "stages": pipeline.get("stages") or {},
         },
         "blueprint": {
-            "present": bool(bp),
-            "job_state": job.get("state") if job else None,
-            "last_error": job.get("last_error") if job else None,
+            "present": bool(blueprint.get("present")),
+            "job_state": blueprint.get("job_state"),
+            "last_error": blueprint.get("last_error"),
         },
         "raw_transcript": {
-            "content_chars": rt.get("content_chars"),
-            "segment_count": rt.get("segment_count"),
-            "embedded": bool(rt.get("embedded")),
-            "blueprinted": bool(rt.get("blueprinted")),
-            "transcript_deleted_at": rt.get("transcript_deleted_at"),
+            "content_chars": record.contentChars,
+            "segment_count": record.segmentCount,
+            "embedded": bool(record.rawEmbedded),
+            "blueprinted": bool(record.rawBlueprinted),
+            "transcript_deleted_at": record.transcriptDeletedAt,
         },
-        "updated_at": rt.get("captured_at"),
+        "updated_at": record.timestamp,
     }
 
 
@@ -1379,77 +1229,25 @@ async def get_stats(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> StatsResponse:
     """Compute stats for popup cards from local browser_memory records."""
-    store = _get_store()
     namespace = _get_namespace(credentials)
     try:
-        if hasattr(store, "collection"):  # ChromaVectorStore
-            result = store.collection.get(
-                where={"namespace": namespace},
-                include=["documents", "metadatas"],
-                limit=5000,
-            )
-            metadatas: List[Dict[str, Any]] = []
-            seen_ids: set[str] = set()
-            for rid, doc, m in zip(
-                result.get("ids", []),
-                result.get("documents", []) or [],
-                result.get("metadatas", []) or [],
-            ):
-                m = m or {}
-                if not is_browser_memory(m, doc or ""):
-                    continue
-                m = normalize_browser_metadata(m, doc or "")
-                logical_id = _logical_record_id(rid, m)
-                if logical_id in seen_ids:
-                    continue
-                seen_ids.add(logical_id)
-                metadatas.append(m)
-
-            try:
-                from apps.shail import raw_transcripts as _rt
-                for raw in _rt.list_recent(namespace=namespace, limit=5000):
-                    raw_id = raw.get("memory_id")
-                    if not raw_id or raw_id in seen_ids:
-                        continue
-                    meta = raw.get("metadata") or {}
-                    content = raw.get("content") or ""
-                    if not is_browser_memory(meta, content):
-                        continue
-                    meta = normalize_browser_metadata(meta, content)
-                    meta.setdefault("timestamp", raw.get("captured_at"))
-                    seen_ids.add(raw_id)
-                    metadatas.append(meta)
-            except Exception as raw_exc:
-                logger.warning("Stats raw transcript merge failed: %s", raw_exc)
-
-            total = len(metadatas)
-
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            this_week = sum(
-                1 for m in metadatas if m.get("timestamp", "") >= week_ago
-            )
-
-            source_counts: Dict[str, int] = {}
-            latest_ts: Optional[str] = None
-            for m in metadatas:
-                src = normalize_browser_metadata(m).get("sourceApp", "web")
-                source_counts[src] = source_counts.get(src, 0) + 1
-                ts = m.get("timestamp")
-                if ts and (latest_ts is None or ts > latest_ts):
-                    latest_ts = ts
-
-            top_source = (
-                max(source_counts, key=lambda k: source_counts[k])
-                if source_counts
-                else None
-            )
-
-            return StatsResponse(
-                totalMemories=total,
-                memoriesThisWeek=this_week,
-                topSource=top_source,
-                lastCapturedAt=latest_ts,
-            )
+        records = list_browser_memory_records(browser_visible_namespaces(namespace), limit=5000)
+        total = len(records)
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        this_week = sum(1 for r in records if (r.timestamp or "") >= week_ago)
+        source_counts: Dict[str, int] = {}
+        latest_ts: Optional[str] = None
+        for r in records:
+            source_counts[r.sourceApp] = source_counts.get(r.sourceApp, 0) + 1
+            if r.timestamp and (latest_ts is None or r.timestamp > latest_ts):
+                latest_ts = r.timestamp
+        top_source = max(source_counts, key=lambda k: source_counts[k]) if source_counts else None
+        return StatsResponse(
+            totalMemories=total,
+            memoriesThisWeek=this_week,
+            topSource=top_source,
+            lastCapturedAt=latest_ts,
+        )
     except Exception as exc:
         logger.error("Stats failed: %s", exc)
 
@@ -1482,17 +1280,15 @@ async def get_altitude(
         for i in range(days)
     }
 
-    for row in _collect_user_capture_records(namespace).values():
-        meta = row.get("metadata") or {}
-        dt = _parse_capture_timestamp(meta.get("timestamp") or meta.get("captured_at"))
+    for row in list_browser_memory_records(browser_visible_namespaces(namespace), limit=5000):
+        dt = _parse_capture_timestamp(row.timestamp)
         if not dt:
             continue
         day = dt.date()
         if day < start_day or day > today:
             continue
         key = day.isoformat()
-        content = row.get("content") or ""
-        buckets[key]["bytes"] += len(content.encode("utf-8"))
+        buckets[key]["bytes"] += len((row.content or "").encode("utf-8"))
         buckets[key]["captures"] += 1
 
     if user_id:
@@ -1545,52 +1341,19 @@ async def export_memories(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ):
     """Download all memories for the authenticated namespace as a JSON file."""
-    store = _get_store()
     namespace = _get_namespace(credentials)
     try:
-        if hasattr(store, "collection"):
-            result = store.collection.get(
-                where={"namespace": namespace},
-                include=["documents", "metadatas"],
-            )
-            items = []
-            seen_ids: set[str] = set()
-            for rid, doc, meta in zip(
-                result.get("ids", []),
-                result.get("documents", []),
-                result.get("metadatas", []),
-            ):
-                meta = meta or {}
-                if not is_browser_memory(meta, doc or ""):
-                    continue
-                meta = normalize_browser_metadata(meta, doc or "")
-                logical_id = _logical_record_id(rid, meta)
-                if logical_id in seen_ids:
-                    continue
-                seen_ids.add(logical_id)
-                items.append(_meta_to_item(logical_id, doc or "", 0.0, meta, include_content=True).dict())
-            try:
-                from apps.shail import raw_transcripts as _rt
-                for raw in _rt.list_recent(namespace=namespace, limit=5000):
-                    raw_id = raw.get("memory_id")
-                    if not raw_id or raw_id in seen_ids:
-                        continue
-                    if not is_browser_memory(raw.get("metadata") or {}, raw.get("content") or ""):
-                        continue
-                    seen_ids.add(raw_id)
-                    items.append(_raw_transcript_to_item(raw, include_content=True).dict())
-            except Exception as raw_exc:
-                logger.warning("Export raw transcript merge failed: %s", raw_exc)
-            payload = json.dumps(items, ensure_ascii=False, indent=2)
-            return Response(
-                content=payload,
-                media_type="application/json",
-                headers={"Content-Disposition": 'attachment; filename="shail-export.json"'},
-            )
+        records = list_browser_memory_records(browser_visible_namespaces(namespace), limit=5000)
+        items = [r.to_extension_item(include_content=True) for r in records]
+        payload = json.dumps(items, ensure_ascii=False, indent=2)
+        return Response(
+            content=payload,
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="shail-export.json"'},
+        )
     except Exception as exc:
         logger.error("Export failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
-    raise HTTPException(status_code=501, detail="Export not supported for this store")
 
 
 @browser_router.post("/import", response_model=ImportResponse, status_code=200)

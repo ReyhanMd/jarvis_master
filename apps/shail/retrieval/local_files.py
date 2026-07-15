@@ -132,6 +132,7 @@ def _search_with_score(
                     "FROM path_index p "
                     "JOIN path_index_fts f ON f.id = p.id "
                     "WHERE path_index_fts MATCH ? AND p.is_dir = 0 "
+                    "AND p.deleted_at IS NULL "
                     "ORDER BY _bm25 LIMIT ?",
                     (fts_q, limit),
                 ).fetchall()
@@ -142,6 +143,8 @@ def _search_with_score(
                 scored = []
                 for r in rows:
                     d = dict(r)
+                    if path_index.is_denied(db_path, d.get("path") or ""):
+                        continue
                     bm = float(d.pop("_bm25") or 0.0)
                     clamped = max(0.0, min(20.0, abs(bm)))
                     d["_score_raw"] = bm
@@ -164,6 +167,8 @@ def _search_with_score(
     for r in rows:
         d = dict(r) if not isinstance(r, dict) else r
         if d.get("is_dir"):
+            continue
+        if path_index.is_denied(db_path, d.get("path") or ""):
             continue
         d["_score_raw"] = None
         d["_score_norm"] = 0.5  # neutral

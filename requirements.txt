@@ -12,6 +12,7 @@ httpx>=0.27.0
 langchain>=0.3.0
 langchain-google-genai>=1.0.0
 langchain-core>=0.3.0
+langchain-ollama>=0.2.0
 
 # Task Queue
 redis>=5.0.0
@@ -24,6 +25,7 @@ requests>=2.31.0
 fastmcp>=0.1.0
 psycopg2-binary>=2.9.9
 chromadb>=0.5.5
+watchdog>=4.0.0
 
 # Auth
 PyJWT[crypto]>=2.8.0
@@ -43,4 +45,3 @@ langgraph-checkpoint>=0.2.0
 pynput>=1.7.6  # For mouse/keyboard control
 pyautogui>=0.9.54  # Alternative mouse/keyboard control
 pyobjc>=10.0  # macOS AppKit integration (for window management)
-

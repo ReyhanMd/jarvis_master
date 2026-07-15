@@ -35,7 +35,11 @@ class TestSchemaMigration:
         from shail.memory.path_index import _conn
         with _conn(fresh_db) as con:
             cols = [r["name"] for r in con.execute("PRAGMA table_info(path_index)")]
-        for needed in ("parent_path", "depth", "is_dir", "child_count", "kind", "embedded"):
+        for needed in (
+            "parent_path", "depth", "is_dir", "child_count", "kind", "embedded",
+            "content_hash", "first_seen_at", "last_seen_at", "deleted_at",
+            "last_scan_status",
+        ):
             assert needed in cols, f"missing column: {needed}"
 
     def test_alter_idempotent(self, fresh_db):
@@ -127,6 +131,40 @@ class TestScanAndTree:
         # Both top-level roots should appear
         assert "a" in names and "b" in names
 
+    def test_scan_marks_missing_files_deleted_not_removed(self, fresh_db, tmp_path):
+        from shail.memory.path_index import get_by_path, scan, stats, _conn
+        root = tmp_path / "root"
+        root.mkdir()
+        f = root / "gone.md"
+        f.write_text("temporary note")
+        scan(fresh_db, roots=[str(root)])
+        assert get_by_path(fresh_db, str(f)) is not None
+
+        f.unlink()
+        scan(fresh_db, roots=[str(root)])
+
+        assert get_by_path(fresh_db, str(f)) is None
+        with _conn(fresh_db) as con:
+            row = con.execute("SELECT deleted_at, last_scan_status FROM path_index WHERE path = ?", (str(f),)).fetchone()
+        assert row["deleted_at"] is not None
+        assert row["last_scan_status"] == "deleted"
+        assert stats(fresh_db)["total_files"] == 0
+
+    def test_scan_records_hash_and_seen_timestamps(self, fresh_db, tmp_path):
+        from shail.memory.path_index import get_by_path, scan
+        root = tmp_path / "root"
+        root.mkdir()
+        f = root / "note.md"
+        f.write_text("hash me")
+
+        scan(fresh_db, roots=[str(root)])
+        row = get_by_path(fresh_db, str(f))
+
+        assert row["content_hash"].startswith("sha256:")
+        assert row["first_seen_at"] is not None
+        assert row["last_seen_at"] is not None
+        assert row["deleted_at"] is None
+
 
 class TestFTS5Search:
     def test_search_finds_by_filename(self, fresh_db, tmp_path):
@@ -153,6 +191,90 @@ class TestFTS5Search:
         scan(fresh_db, roots=[str(root)])
         hits = search(fresh_db, "", limit=10)
         assert len(hits) > 0
+
+
+class TestDenylist:
+    def test_denylist_blocks_scan_search_tree_and_lookup(self, fresh_db, tmp_path):
+        from shail.memory.path_index import (
+            add_deny_path,
+            get_by_path,
+            list_deny_paths,
+            scan,
+            search,
+            tree,
+        )
+
+        root = _seed_dir(tmp_path)
+        blocked = root / "subdir"
+        assert add_deny_path(fresh_db, str(blocked), reason="private")
+        assert list_deny_paths(fresh_db)[0]["reason"] == "private"
+
+        scan(fresh_db, roots=[str(root)])
+
+        assert get_by_path(fresh_db, str(blocked / "nested.txt")) is None
+        hits = search(fresh_db, "nested widget", limit=10)
+        assert all("nested.txt" not in h["path"] for h in hits)
+
+        nodes = {n["id"] for n in tree(fresh_db, root=str(root), depth=3)["nodes"]}
+        assert str(blocked) not in nodes
+        assert str(blocked / "nested.txt") not in nodes
+
+
+class TestLocalFileOnboarding:
+    def test_onboarding_defaults_incomplete_and_no_active_default_roots(self, fresh_db):
+        from shail.memory.path_index import get_active_scan_roots, get_onboarding_state
+
+        state = get_onboarding_state(fresh_db)
+
+        assert state["completed"] is False
+        assert state["scan_mode"] == "manual_approved_roots_only"
+        assert state["acknowledged"] is False
+        assert get_active_scan_roots(fresh_db, env_roots=[]) == []
+
+    def test_complete_onboarding_persists_roots_and_deny_paths(self, fresh_db, tmp_path):
+        from shail.memory.path_index import (
+            complete_onboarding,
+            get_active_scan_roots,
+            get_onboarding_state,
+            list_deny_paths,
+            list_roots,
+        )
+
+        approved = tmp_path / "approved"
+        denied = approved / "private"
+        denied.mkdir(parents=True)
+
+        state = complete_onboarding(
+            fresh_db,
+            approved_roots=[str(approved)],
+            denied_paths=[str(denied)],
+            acknowledged=True,
+        )
+
+        assert state["completed"] is True
+        assert str(approved.resolve()) in get_active_scan_roots(fresh_db, env_roots=[])
+        assert any(r["path"] == str(approved.resolve()) for r in list_roots(fresh_db))
+        assert any(r["path"] == str(denied.resolve()) for r in list_deny_paths(fresh_db))
+        assert get_onboarding_state(fresh_db)["acknowledged"] is True
+
+    def test_complete_onboarding_requires_acknowledgement(self, fresh_db, tmp_path):
+        from shail.memory.path_index import complete_onboarding
+
+        root = tmp_path / "root"
+        root.mkdir()
+        with pytest.raises(ValueError):
+            complete_onboarding(
+                fresh_db,
+                approved_roots=[str(root)],
+                acknowledged=False,
+            )
+
+    def test_scan_empty_roots_does_not_fall_back_to_defaults(self, fresh_db):
+        from shail.memory.path_index import scan, stats
+
+        assert scan(fresh_db, roots=[]) == 0
+        assert stats(fresh_db)["total_files"] == 0
+
 
 
 class TestMarkEmbedded:

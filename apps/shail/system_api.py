@@ -14,6 +14,7 @@ POST /system/restart/{service}→ stop + start a single service (auth required)
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import shutil
@@ -25,7 +26,7 @@ import time
 from typing import AsyncIterator, Dict, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -92,6 +93,87 @@ async def _http_ok(url: str, timeout: float = 2.0) -> bool:
             return r.status_code == 200
     except Exception:
         return False
+
+
+def _dep_ready(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _check_local_rag_routes(request: Request) -> dict:
+    paths = {getattr(route, "path", "") for route in request.app.routes}
+    required = {
+        "/local-rag/status",
+        "/local-rag/evidence",
+        "/local-rag/semantics/status",
+        "/local-rag/semantics/reasoning/status",
+        "/path-index/stats",
+        "/browser/search",
+    }
+    missing = sorted(path for path in required if path not in paths)
+    return {
+        "ok": not missing,
+        "missing": missing,
+    }
+
+
+def _check_path_index() -> dict:
+    try:
+        from apps.shail.settings import get_settings
+        from shail.memory import path_index
+
+        stats = path_index.stats(get_settings().path_index_db)
+        return {
+            "ok": True,
+            "total_files": int(stats.get("total_files") or 0),
+            "total_dirs": int(stats.get("total_dirs") or 0),
+            "db": get_settings().path_index_db,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _check_semantics() -> dict:
+    try:
+        from apps.shail import local_semantics
+
+        status = local_semantics.status()
+        return {
+            "ok": True,
+            "facts": int(status.get("facts") or 0),
+            "tasks": int(status.get("tasks") or 0),
+            "files": status.get("files") or {},
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _check_reasoning() -> dict:
+    try:
+        from apps.shail import local_semantic_reasoning
+
+        status = local_semantic_reasoning.status()
+        return {
+            "ok": True,
+            "groups": int(status.get("groups") or 0),
+            "claims": int(status.get("claims") or 0),
+            "conflicts": int(status.get("conflicts") or 0),
+            "last_built_at": status.get("last_built_at"),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _check_auth_deps() -> dict:
+    deps = {
+        "bcrypt": _dep_ready("bcrypt"),
+        "jwt": _dep_ready("jwt"),
+        "fastapi": _dep_ready("fastapi"),
+        "pydantic": _dep_ready("pydantic"),
+    }
+    return {
+        "ok": all(deps.values()),
+        "dependencies": deps,
+    }
 
 
 _OLLAMA_COMMON_PATHS = [
@@ -413,6 +495,52 @@ async def system_status(
         blueprint_queue = {"total": 0, "pending": 0, "running": 0, "done": 0, "failed": 0}
 
     return {"services": results, "tier": tier, "blueprint_queue": blueprint_queue}
+
+
+@system_router.get("/readiness")
+async def system_readiness(request: Request):
+    """Detailed local readiness probe for dashboard and extension diagnostics.
+
+    This endpoint is intentionally read-only and lightweight. It distinguishes
+    "backend is online" from "a dependency or route is missing" so clients do
+    not show a false generic offline state.
+    """
+    services = {
+        "backend": {"ok": True, "port": PORTS["backend"], "pid": os.getpid()},
+        "ollama": {
+            "ok": await _http_ok(OLLAMA_HEALTH, timeout=1.0),
+            "port": PORTS["ollama"],
+            "binary_path": _ollama_binary_path(),
+        },
+        "redis": {
+            "ok": _port_open(PORTS["redis"], timeout=0.25),
+            "port": PORTS["redis"],
+        },
+    }
+    checks = {
+        "auth_dependencies": _check_auth_deps(),
+        "routes": _check_local_rag_routes(request),
+        "path_index": _check_path_index(),
+        "semantics": _check_semantics(),
+        "reasoning": _check_reasoning(),
+    }
+    critical = [
+        checks["auth_dependencies"]["ok"],
+        checks["routes"]["ok"],
+        checks["path_index"]["ok"],
+        checks["semantics"]["ok"],
+        checks["reasoning"]["ok"],
+    ]
+    return {
+        "status": "ready" if all(critical) else "degraded",
+        "backend_online": True,
+        "services": services,
+        "checks": checks,
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version.split()[0],
+        },
+    }
 
 
 @system_router.post("/start")

@@ -444,6 +444,16 @@ class LocalFileCitation(BaseModel):
     snippet: str = ""
     file_type: str = ""
     score: float = 0.0
+    graph_reason: Optional[str] = None
+    evidence_reason: Optional[str] = None
+    confidence: Optional[str] = None
+    is_latest_candidate: bool = False
+    duplicate_of: Optional[str] = None
+    answer_confidence: Optional[str] = None
+    evidence_bundle_id: Optional[str] = None
+    resolved_claim_id: Optional[str] = None
+    conflict_group_id: Optional[str] = None
+    warning_type: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -667,28 +677,43 @@ async def _build_context(
     local_file_task = None
     _settings_lf = get_settings()
     if _settings_lf.shail_local_files_in_chat:
-        async def _local_files() -> list[LocalFileCitation]:
+        async def _local_files() -> tuple[list[LocalFileCitation], str]:
             try:
-                from apps.shail.retrieval.local_files import retrieve_local_file_context
-                hits = await asyncio.to_thread(
-                    retrieve_local_file_context, query,
+                from apps.shail.grounded_answer import build_grounded_answer
+                grounded = await asyncio.to_thread(
+                    build_grounded_answer,
+                    query,
+                    user_id=user_id,
                     k=_settings_lf.shail_local_files_k,
-                    max_snippet_chars=_settings_lf.shail_local_files_snippet_chars,
-                    read_cap_bytes=_settings_lf.shail_local_files_read_cap_bytes,
+                    include_graph=True,
                 )
                 min_score = _settings_lf.shail_local_files_min_score
-                hits = [h for h in hits if h.score >= min_score]
-                return [
+                cites = [
                     LocalFileCitation(
-                        id=h.id, title=h.title, path=h.path,
-                        snippet=h.snippet[:_settings_lf.shail_local_files_snippet_chars],
-                        file_type=h.file_type, score=h.score,
+                        id=str(citation.get("id") or ""),
+                        title=str(citation.get("title") or ""),
+                        path=str(citation.get("path") or ""),
+                        snippet=str(citation.get("snippet") or "")[:_settings_lf.shail_local_files_snippet_chars],
+                        file_type=str(citation.get("file_type") or ""),
+                        score=float(citation.get("score") or 0.0),
+                        graph_reason=citation.get("graph_reason"),
+                        evidence_reason=citation.get("evidence_reason"),
+                        confidence=citation.get("confidence"),
+                        is_latest_candidate=bool(citation.get("is_latest_candidate") or False),
+                        duplicate_of=citation.get("duplicate_of"),
+                        answer_confidence=citation.get("answer_confidence"),
+                        evidence_bundle_id=citation.get("evidence_bundle_id"),
+                        resolved_claim_id=citation.get("resolved_claim_id"),
+                        conflict_group_id=citation.get("conflict_group_id"),
+                        warning_type=citation.get("warning_type"),
                     )
-                    for h in hits
+                    for citation in grounded.citations
+                    if float(citation.get("score") or 0.0) >= min_score
                 ]
+                return cites, grounded.prompt_context
             except Exception as exc:
                 logger.debug("local file retrieval skipped: %s", exc)
-                return []
+                return [], ""
         local_file_task = asyncio.create_task(_local_files())
     web_task = (
         asyncio.create_task(web_search(query, max_results=WEB_MAX_RESULTS, timeout=WEB_TIMEOUT))
@@ -699,7 +724,7 @@ async def _build_context(
     past_hits    = await past_task
     mcp_cites    = await mcp_task
     mcp_rag_hits = await mcp_rag_task
-    local_files  = await local_file_task if local_file_task else []
+    local_files, local_file_context = await local_file_task if local_file_task else ([], "")
     # Merge live fetch + indexed vector results; deduplicate by (provider, id)
     seen_mcp = {(c.provider, c.id) for c in mcp_cites}
     for c in mcp_rag_hits:
@@ -789,26 +814,14 @@ async def _build_context(
         parts.append("\n\n".join(mcp_lines))
 
     # ── Local files ──
-    # Pointer-only retrieval: the file lives ONLY on the user's disk; nothing
-    # was written to the vector store. The model sees the snippet, the
-    # extractor used, the score, and the file_type so it can rank these
-    # against memories / web / MCP hits.
+    # Pointer-only evidence bundle: files live ONLY on the user's disk; nothing
+    # is written to vector memory. The model sees snippets, graph/evidence
+    # reasons, version hints, scores, and citation ids.
     if local_files:
-        file_lines = [
-            "[AVAILABLE CITATIONS — Local files on this device]",
-            "(Not in memory. Content read live from disk. Cite with "
-            "{{cite:local_file:<id>}}.)",
-        ]
+        parts.append(local_file_context)
         for f in local_files:
-            header = f"[local_file_id={f.id} type={f.file_type or 'unknown'} score={f.score:.2f}]"
-            file_lines.append(
-                f"{header} {f.title}\n"
-                f"path: {f.path}\n"
-                f"{f.snippet}"
-            )
             write_event("RECALL", f"local file used as chat context: {f.title[:60]}",
                         user_id=user_id, ref_id=f.id)
-        parts.append("\n\n".join(file_lines))
 
     # ── Web ──
     if web_results:
@@ -1633,7 +1646,15 @@ def _collect_citations(
         out.append({
             "type": "local_file", "id": f.id, "title": f.title,
             "path": f.path, "snippet": f.snippet, "file_type": f.file_type,
-            "score": f.score,
+            "score": f.score, "graph_reason": f.graph_reason,
+            "evidence_reason": f.evidence_reason, "confidence": f.confidence,
+            "is_latest_candidate": f.is_latest_candidate,
+            "duplicate_of": f.duplicate_of,
+            "answer_confidence": f.answer_confidence,
+            "evidence_bundle_id": f.evidence_bundle_id,
+            "resolved_claim_id": f.resolved_claim_id,
+            "conflict_group_id": f.conflict_group_id,
+            "warning_type": f.warning_type,
         })
     return out
 

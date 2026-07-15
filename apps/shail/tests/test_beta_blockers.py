@@ -238,6 +238,39 @@ class TestFilesystemWatcher:
         rows = adapter.list_watches("u_real")
         assert not any(r["path"] == str(tmp_path.resolve()) for r in rows)
 
+    def test_start_watch_same_path_different_user_is_path_idempotent(self, isolated_db, tmp_path, monkeypatch):
+        """macOS FSEvents rejects duplicate physical path watches."""
+        from shail.integrations.local.filesystem import adapter as fs_adapter
+
+        class FakeObserver:
+            created = 0
+
+            def __init__(self):
+                FakeObserver.created += 1
+
+            def schedule(self, *args, **kwargs):
+                return None
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+        monkeypatch.setattr(fs_adapter, "Observer", FakeObserver)
+        FileSystemAdapter = fs_adapter.FileSystemAdapter
+        adapter = FileSystemAdapter()
+        first = adapter.start_watch("u1", str(tmp_path))
+        second = adapter.start_watch("u2", str(tmp_path))
+        assert first["status"] == "watching"
+        assert second["status"] == "already_watching"
+        assert len(adapter._watches) == 1
+        assert FakeObserver.created == 1
+        adapter.stop_all()
+
     def test_start_watch_on_nonexistent_path_fails(self, isolated_db):
         from shail.integrations.local.filesystem.adapter import FileSystemAdapter
         adapter = FileSystemAdapter()

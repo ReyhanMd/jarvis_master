@@ -100,8 +100,14 @@ const AUTH_BASE    = 'http://localhost:8000/auth';
 const AUTH_BASE_FB = 'http://127.0.0.1:8000/auth';
 const SYSTEM_BASE  = 'http://localhost:8000/system';
 const SYSTEM_BASE_FB = 'http://127.0.0.1:8000/system';
+const LOCAL_RAG_BASE = 'http://localhost:8000/local-rag';
+const LOCAL_RAG_BASE_FB = 'http://127.0.0.1:8000/local-rag';
+const PATH_INDEX_BASE = 'http://localhost:8000/path-index';
+const PATH_INDEX_BASE_FB = 'http://127.0.0.1:8000/path-index';
 const HEALTH_URL   = 'http://localhost:8000/health';
 const HEALTH_URL_FB = 'http://127.0.0.1:8000/health';
+const READINESS_URL = 'http://localhost:8000/system/readiness';
+const READINESS_URL_FB = 'http://127.0.0.1:8000/system/readiness';
 
 export interface ServiceStatusInfo {
   status: 'running' | 'stopped' | 'not_installed' | 'starting' | 'error' | 'unknown';
@@ -121,22 +127,74 @@ export interface SystemStatus {
   };
 }
 
+export interface LocalRAGStatus {
+  repair_backlog: {
+    raw_total: number;
+    raw_unembedded: number;
+    raw_unblueprinted: number;
+    stale_running_blueprint_jobs: number;
+    vector_only_browser: number;
+  };
+  path_index: {
+    total_files?: number;
+    total_dirs?: number;
+    embedded?: number;
+    blocked_paths?: Array<{ path: string; reason?: string; added_at?: number }>;
+    roots?: Array<Record<string, unknown>>;
+  };
+  blueprint_queue?: {
+    pending?: number;
+    running?: number;
+    done?: number;
+    failed?: number;
+  };
+  privacy_defaults?: Record<string, unknown>;
+}
+
+export interface PathRecommendedRoot {
+  path: string;
+  label: string;
+  reason: string;
+}
+
+export interface PathOnboardingState {
+  completed: boolean;
+  completed_at?: number | null;
+  selected_roots: string[];
+  denied_paths: string[];
+  scan_mode: string;
+  acknowledged: boolean;
+  skipped: boolean;
+  recommended_roots: PathRecommendedRoot[];
+  active_roots: string[];
+  plain_language_explanation: string;
+  scan_status?: string;
+}
+
+export interface CompletePathOnboardingPayload {
+  approved_roots: string[];
+  denied_paths?: string[];
+  scan_now?: boolean;
+  acknowledged: boolean;
+  skipped?: boolean;
+  scan_mode?: string;
+}
+
 /** Single source of truth for "is the backend reachable?".
  *
- * Sprint 1 fix: previously returned ok:true on any HTTP 200, even when
- * /health reported chroma_ready:false (e.g. embedding model not loaded).
- * Captures would silently 500 after the popup said "online". Now we
- * distinguish:
- *   ok:true              — chroma + embedder both ready, captures will work
- *   ok:false, degraded   — backend reachable but a dep is down (orange)
- *   ok:false             — backend unreachable (red)
+ * `ok` means the HTTP backend is reachable. Dependency readiness is reported
+ * separately as `degraded`, so the UI does not call a live backend "offline"
+ * just because Ollama/Chroma is not ready yet.
  */
 export async function pingBackend(): Promise<{
   ok: boolean;
   degraded?: boolean;
+  status?: string;
+  readiness?: Record<string, unknown>;
   chroma_ready?: boolean;
   embedder_ready?: boolean;
   ollama_reachable?: boolean;
+  reason?: string;
 }> {
   const tryUrl = async (url: string) => {
     const controller = new AbortController();
@@ -149,14 +207,31 @@ export async function pingBackend(): Promise<{
   try {
     let json: Record<string, unknown>;
     try {
-      json = await tryUrl(HEALTH_URL);
+      json = await tryUrl(READINESS_URL);
     } catch {
-      json = await tryUrl(HEALTH_URL_FB); // Brave fallback
+      try {
+        json = await tryUrl(READINESS_URL_FB); // Brave fallback
+      } catch {
+        try {
+          json = await tryUrl(HEALTH_URL);
+        } catch {
+          json = await tryUrl(HEALTH_URL_FB);
+        }
+      }
+    }
+    if ('checks' in json || 'backend_online' in json) {
+      return {
+        ok: true,
+        degraded: json.status !== 'ready',
+        status: String(json.status || 'unknown'),
+        readiness: json,
+      };
     }
     const ready = !!(json.chroma_ready && json.embedder_ready);
-    return { ok: ready, degraded: !ready, ...json };
-  } catch {
-    return { ok: false };
+    return { ok: true, degraded: !ready, status: String(json.status || 'unknown'), ...json };
+  } catch (error) {
+    const msg = (error as Error).message || 'backend unreachable';
+    return { ok: false, reason: msg };
   }
 }
 
@@ -199,19 +274,25 @@ async function localFetch<T>(path: string, init?: RequestInit, base = LOCAL_BASE
   const attempt = async (baseUrl: string): Promise<T> => {
     const controller = new AbortController();
     const timeoutId  = setTimeout(() => controller.abort(), 8000);
+    const headers: Record<string, string> = {
+      ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+      ...((init?.headers as Record<string, string> | undefined) ?? {}),
+    };
+    if (init?.body != null && !headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
     try {
       const res = await fetch(`${baseUrl}${path}`, {
         ...init,
         signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
-          ...(init?.headers ?? {}),
-        },
+        headers,
       });
       clearTimeout(timeoutId);
       if (res.status === 401) throw new Error('NOT_SIGNED_IN');
-      if (res.status === 404) throw new Error('MEMORY_NOT_FOUND');
+      if (res.status === 404) {
+        if (path.includes('/memories/')) throw new Error('MEMORY_NOT_FOUND');
+        throw new Error(`ROUTE_NOT_LOADED:${path}`);
+      }
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         throw new Error(`SHAIL ${path} → ${res.status}: ${body.slice(0, 200)}`);
@@ -237,6 +318,8 @@ async function localFetch<T>(path: string, init?: RequestInit, base = LOCAL_BASE
       const fallback = base === LOCAL_BASE  ? LOCAL_BASE_FB
                      : base === AUTH_BASE   ? AUTH_BASE_FB
                      : base === SYSTEM_BASE ? SYSTEM_BASE_FB
+                     : base === LOCAL_RAG_BASE ? LOCAL_RAG_BASE_FB
+                     : base === PATH_INDEX_BASE ? PATH_INDEX_BASE_FB
                      : null;
       if (fallback) {
         return await attempt(fallback);
@@ -250,9 +333,11 @@ async function localFetch<T>(path: string, init?: RequestInit, base = LOCAL_BASE
 export function userFacingError(err: unknown): string {
   const msg = (err as Error)?.message ?? 'Unknown error';
   if (msg === 'BACKEND_OFFLINE' || /failed to fetch|networkerror|load failed/i.test(msg))
-    return 'SHAIL offline — start the backend app';
+    return 'SHAIL backend is not reachable — start SHAIL or run ./shailctl health';
   if (msg === 'BACKEND_TIMEOUT')
-    return 'Backend timeout — is the app running?';
+    return 'Backend timeout — the app is running slowly or a route is blocked';
+  if (msg.startsWith('ROUTE_NOT_LOADED:'))
+    return `Backend route not loaded — restart SHAIL backend (${msg.slice('ROUTE_NOT_LOADED:'.length)})`;
   if (msg === 'MEMORY_NOT_FOUND')
     return 'Memory not found';
   if (msg === 'NOT_SIGNED_IN')
@@ -366,6 +451,55 @@ export const api = {
 
   async systemStatus(): Promise<SystemStatus> {
     return localFetch<SystemStatus>('/status', undefined, SYSTEM_BASE);
+  },
+
+  async localRagStatus(): Promise<LocalRAGStatus> {
+    return localFetch<LocalRAGStatus>('/status', undefined, LOCAL_RAG_BASE);
+  },
+
+  async getPathOnboarding(): Promise<PathOnboardingState> {
+    return localFetch<PathOnboardingState>('/onboarding', undefined, PATH_INDEX_BASE);
+  },
+
+  async completePathOnboarding(payload: CompletePathOnboardingPayload): Promise<PathOnboardingState> {
+    return localFetch<PathOnboardingState>(
+      '/onboarding/complete',
+      { method: 'POST', body: JSON.stringify(payload) },
+      PATH_INDEX_BASE,
+    );
+  },
+
+  async resetPathOnboarding(): Promise<PathOnboardingState> {
+    return localFetch<PathOnboardingState>(
+      '/onboarding/reset',
+      { method: 'POST' },
+      PATH_INDEX_BASE,
+    );
+  },
+
+  async getPathRoots(): Promise<{
+    env_roots: string[];
+    persisted_roots: Array<Record<string, unknown>>;
+    default_roots: string[];
+    active_roots: string[];
+  }> {
+    return localFetch('/roots', undefined, PATH_INDEX_BASE);
+  },
+
+  async addPathRoot(path: string): Promise<{ ok: boolean; added: boolean; path?: string; message?: string }> {
+    return localFetch(
+      '/roots',
+      { method: 'POST', body: JSON.stringify({ path }) },
+      PATH_INDEX_BASE,
+    );
+  },
+
+  async addDenyPath(path: string, reason = 'user') {
+    return localFetch(
+      '/denylist',
+      { method: 'POST', body: JSON.stringify({ path, reason }) },
+      PATH_INDEX_BASE,
+    );
   },
 
   systemRestartUrl(service: string): string {
@@ -571,18 +705,18 @@ export const api = {
   // ── Ascents ───────────────────────────────────────────────────────────────
 
   async listAscents(): Promise<AscentListResponse> {
-    return localFetch<AscentListResponse>('/ascents', undefined, 'http://localhost:8000/browser');
+    return localFetch<AscentListResponse>('/ascents', undefined, LOCAL_BASE);
   },
 
   async getAscent(id: string): Promise<AscentDetail> {
-    return localFetch<AscentDetail>(`/ascents/${id}`, undefined, 'http://localhost:8000/browser');
+    return localFetch<AscentDetail>(`/ascents/${id}`, undefined, LOCAL_BASE);
   },
 
   async toggleTodo(ascentId: string, todoId: string, completed: boolean): Promise<AscentDetail> {
     return localFetch<AscentDetail>(
       `/ascents/${ascentId}/todos/${todoId}`,
       { method: 'PUT', body: JSON.stringify({ completed }) },
-      'http://localhost:8000/browser',
+      LOCAL_BASE,
     );
   },
 
@@ -590,7 +724,7 @@ export const api = {
     return localFetch<AscentSuggestionsResponse>(
       `/ascents/${ascentId}/suggestions?limit=${limit}`,
       undefined,
-      'http://localhost:8000/browser',
+      LOCAL_BASE,
     );
   },
 

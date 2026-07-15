@@ -21,6 +21,11 @@ interface ChatLocalFileCitation {
   snippet: string;
   file_type: string;
   score: number;
+  graph_reason?: string | null;
+  evidence_reason?: string | null;
+  confidence?: string | null;
+  is_latest_candidate?: boolean;
+  duplicate_of?: string | null;
 }
 import { ChatRenderer } from '../components/ChatRenderer';
 import { BackfillBar } from '../components/phase-c/BackfillBar';
@@ -66,6 +71,9 @@ function citationsFromSseSets(
   for (const f of localFiles ?? []) out.push({
     type: 'local_file', id: f.id, title: f.title, path: f.path,
     snippet: f.snippet, file_type: f.file_type, score: f.score,
+    graph_reason: f.graph_reason, evidence_reason: f.evidence_reason,
+    confidence: f.confidence, is_latest_candidate: f.is_latest_candidate,
+    duplicate_of: f.duplicate_of,
   });
   return out;
 }

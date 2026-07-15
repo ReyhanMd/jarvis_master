@@ -14,13 +14,18 @@ import logging
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
+import hashlib
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_READY: set[str] = set()
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -54,6 +59,12 @@ _PHASE2_ALTERS = (
     # file_name is materialized at write-time because SQLite has no reverse()
     # so we can't compute basename inside an AFTER INSERT trigger.
     "ALTER TABLE path_index ADD COLUMN file_name TEXT",
+    # Sprint 1 local-device consent/lifecycle fields.
+    "ALTER TABLE path_index ADD COLUMN content_hash TEXT",
+    "ALTER TABLE path_index ADD COLUMN first_seen_at REAL",
+    "ALTER TABLE path_index ADD COLUMN last_seen_at REAL",
+    "ALTER TABLE path_index ADD COLUMN deleted_at REAL",
+    "ALTER TABLE path_index ADD COLUMN last_scan_status TEXT",
 )
 
 _PHASE2_INDEXES = (
@@ -61,6 +72,8 @@ _PHASE2_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_path_index_kind   ON path_index(kind)",
     "CREATE INDEX IF NOT EXISTS idx_path_index_is_dir ON path_index(is_dir)",
     "CREATE INDEX IF NOT EXISTS idx_path_index_emb    ON path_index(embedded)",
+    "CREATE INDEX IF NOT EXISTS idx_path_index_hash   ON path_index(content_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_path_index_deleted ON path_index(deleted_at)",
 )
 
 # Persisted custom scan roots — survive restarts, merged with env + defaults.
@@ -70,6 +83,28 @@ CREATE TABLE IF NOT EXISTS scan_roots (
     added_at   REAL NOT NULL,
     file_count INTEGER DEFAULT 0,
     last_scan  REAL
+);
+"""
+
+_DENYLIST_DDL = """
+CREATE TABLE IF NOT EXISTS path_denylist (
+    path       TEXT PRIMARY KEY,
+    reason     TEXT,
+    added_at   REAL NOT NULL
+);
+"""
+
+_ONBOARDING_DDL = """
+CREATE TABLE IF NOT EXISTS path_onboarding (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    completed       INTEGER NOT NULL DEFAULT 0,
+    completed_at    REAL,
+    selected_roots_json TEXT NOT NULL DEFAULT '[]',
+    denied_paths_json   TEXT NOT NULL DEFAULT '[]',
+    scan_mode       TEXT NOT NULL DEFAULT 'manual_approved_roots_only',
+    acknowledged    INTEGER NOT NULL DEFAULT 0,
+    skipped         INTEGER NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL
 );
 """
 
@@ -134,10 +169,25 @@ def _classify_kind(ext: str) -> str:
 
 @contextmanager
 def _conn(db_path: str) -> Generator[sqlite3.Connection, None, None]:
+    db_path = os.path.abspath(os.path.expanduser(db_path))
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=10.0)
     con.row_factory = sqlite3.Row
     try:
+        con.execute("PRAGMA busy_timeout = 10000")
+        con.execute("PRAGMA journal_mode = WAL")
+        _ensure_schema_once(con, db_path)
+        yield con
+    finally:
+        con.close()
+
+
+def _ensure_schema_once(con: sqlite3.Connection, db_path: str) -> None:
+    if db_path in _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if db_path in _SCHEMA_READY:
+            return
         con.executescript(_DDL)
         # Phase 2 schema extensions — idempotent.
         for ddl in _PHASE2_ALTERS:
@@ -154,10 +204,21 @@ def _conn(db_path: str) -> Generator[sqlite3.Connection, None, None]:
         _ensure_fts(con)
         # Persisted scan roots table.
         con.executescript(_SCAN_ROOTS_DDL)
+        # User-controlled "do not read" list.
+        con.executescript(_DENYLIST_DDL)
+        # First-run local-file onboarding state.
+        con.executescript(_ONBOARDING_DDL)
+        con.execute(
+            """
+            INSERT OR IGNORE INTO path_onboarding
+                (id, completed, selected_roots_json, denied_paths_json,
+                 scan_mode, acknowledged, skipped, updated_at)
+            VALUES (1, 0, '[]', '[]', 'manual_approved_roots_only', 0, 0, ?)
+            """,
+            (time.time(),),
+        )
         con.commit()
-        yield con
-    finally:
-        con.close()
+        _SCHEMA_READY.add(db_path)
 
 
 def _ensure_fts(con: sqlite3.Connection) -> None:
@@ -169,9 +230,21 @@ def _ensure_fts(con: sqlite3.Connection) -> None:
         con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS path_index_fts USING fts5("
                     "id UNINDEXED, path, file_name, title, summary_snippet, kind UNINDEXED, "
                     "is_dir UNINDEXED, tokenize='unicode61 remove_diacritics 2')")
+        con.execute("SELECT 1 FROM path_index_fts LIMIT 0")
     except sqlite3.OperationalError as exc:
-        logger.warning("path_index FTS5 unavailable: %s — falling back to LIKE", exc)
-        return
+        msg = str(exc).lower()
+        if "vtable constructor failed" not in msg and "malformed" not in msg:
+            logger.warning("path_index FTS5 unavailable: %s — falling back to LIKE", exc)
+            return
+        logger.warning("path_index FTS mirror is unhealthy; rebuilding it: %s", exc)
+        try:
+            con.execute("DROP TABLE IF EXISTS path_index_fts")
+            con.execute("CREATE VIRTUAL TABLE path_index_fts USING fts5("
+                        "id UNINDEXED, path, file_name, title, summary_snippet, kind UNINDEXED, "
+                        "is_dir UNINDEXED, tokenize='unicode61 remove_diacritics 2')")
+        except sqlite3.OperationalError as repair_exc:
+            logger.warning("path_index FTS repair failed: %s — falling back to LIKE", repair_exc)
+            return
     # Triggers keep FTS in sync. file_name is a stored column populated by
     # Python at write-time (SQLite has no reverse() to compute basename).
     try:
@@ -229,6 +302,17 @@ def fts_available(db_path: str) -> bool:
 def _parent_path(p: Path) -> Optional[str]:
     parent = str(p.parent)
     return parent if parent and parent != str(p) else None
+
+
+def _content_hash(p: Path) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return "sha256:" + h.hexdigest()
+    except OSError:
+        return None
 
 
 _SNIPPET_MAX_BYTES        = 100_000     # plain-text size cap for snippet read
@@ -319,6 +403,8 @@ def upsert_file(db_path: str, file_path: str, *, extract_snippet: bool = True) -
     full extraction on demand by local-file retrieval.
     """
     p = Path(file_path)
+    if is_denied(db_path, str(p)):
+        return None
     if not p.exists() or not p.is_file():
         return None
     ext = p.suffix.lower()
@@ -329,20 +415,26 @@ def upsert_file(db_path: str, file_path: str, *, extract_snippet: bool = True) -
     except OSError:
         return None
 
+    now = time.time()
     parent = _parent_path(p)
     depth = len(p.parts) - 1
     kind = _classify_kind(ext)
     snippet = _extract_snippet(p, kind) if extract_snippet else None
+    content_hash = _content_hash(p)
 
     with _conn(db_path) as con:
-        existing = con.execute("SELECT id FROM path_index WHERE path = ?", (str(p),)).fetchone()
+        existing = con.execute(
+            "SELECT id, first_seen_at FROM path_index WHERE path = ?", (str(p),)
+        ).fetchone()
         record_id = existing["id"] if existing else str(uuid.uuid4())
         con.execute(
             """
             INSERT INTO path_index (id, path, file_type, size_bytes, mtime, title,
                                     summary_snippet, indexed_at, parent_path, depth,
-                                    is_dir, kind, file_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                                    is_dir, kind, file_name, content_hash,
+                                    first_seen_at, last_seen_at, deleted_at,
+                                    last_scan_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NULL, 'present')
             ON CONFLICT(path) DO UPDATE SET
                 file_type       = excluded.file_type,
                 size_bytes      = excluded.size_bytes,
@@ -353,10 +445,16 @@ def upsert_file(db_path: str, file_path: str, *, extract_snippet: bool = True) -
                 parent_path     = excluded.parent_path,
                 depth           = excluded.depth,
                 kind            = excluded.kind,
-                file_name       = excluded.file_name
+                file_name       = excluded.file_name,
+                content_hash    = excluded.content_hash,
+                first_seen_at   = COALESCE(path_index.first_seen_at, excluded.first_seen_at),
+                last_seen_at    = excluded.last_seen_at,
+                deleted_at      = NULL,
+                last_scan_status = 'present'
             """,
             (record_id, str(p), ext.lstrip("."), stat.st_size, stat.st_mtime,
-             p.stem, snippet, time.time(), parent, depth, kind, p.name),
+             p.stem, snippet, now, parent, depth, kind, p.name, content_hash,
+             existing["first_seen_at"] if existing and existing["first_seen_at"] else now, now),
         )
         con.commit()
     return record_id
@@ -365,29 +463,40 @@ def upsert_file(db_path: str, file_path: str, *, extract_snippet: bool = True) -
 def upsert_folder(db_path: str, folder_path: str, *, child_count: int = 0) -> Optional[str]:
     """Add or refresh a folder row. Folders aren't filtered by extension."""
     p = Path(folder_path)
+    if is_denied(db_path, str(p)):
+        return None
     if not p.exists() or not p.is_dir():
         return None
     parent = _parent_path(p)
     depth = len(p.parts) - 1
+    now = time.time()
     with _conn(db_path) as con:
-        existing = con.execute("SELECT id FROM path_index WHERE path = ?", (str(p),)).fetchone()
+        existing = con.execute(
+            "SELECT id, first_seen_at FROM path_index WHERE path = ?", (str(p),)
+        ).fetchone()
         record_id = existing["id"] if existing else str(uuid.uuid4())
         con.execute(
             """
             INSERT INTO path_index (id, path, file_type, size_bytes, mtime, title,
                                     indexed_at, parent_path, depth, is_dir, kind,
-                                    child_count, file_name)
-            VALUES (?, ?, 'dir', NULL, NULL, ?, ?, ?, ?, 1, NULL, ?, ?)
+                                    child_count, file_name, first_seen_at,
+                                    last_seen_at, deleted_at, last_scan_status)
+            VALUES (?, ?, 'dir', NULL, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, NULL, 'present')
             ON CONFLICT(path) DO UPDATE SET
                 title       = excluded.title,
                 indexed_at  = excluded.indexed_at,
                 parent_path = excluded.parent_path,
                 depth       = excluded.depth,
                 child_count = excluded.child_count,
-                file_name   = excluded.file_name
+                file_name   = excluded.file_name,
+                first_seen_at = COALESCE(path_index.first_seen_at, excluded.first_seen_at),
+                last_seen_at = excluded.last_seen_at,
+                deleted_at = NULL,
+                last_scan_status = 'present'
             """,
-            (record_id, str(p), p.name or str(p), time.time(), parent, depth,
-             child_count, p.name or str(p)),
+            (record_id, str(p), p.name or str(p), now, parent, depth,
+             child_count, p.name or str(p),
+             existing["first_seen_at"] if existing and existing["first_seen_at"] else now, now),
         )
         con.commit()
     return record_id
@@ -405,7 +514,10 @@ def mark_embedded(db_path: str, path: str, embedded: bool = True) -> None:
 
 def remove_file(db_path: str, file_path: str) -> None:
     with _conn(db_path) as con:
-        con.execute("DELETE FROM path_index WHERE path = ?", (file_path,))
+        con.execute(
+            "UPDATE path_index SET deleted_at = ?, last_scan_status = 'deleted' WHERE path = ?",
+            (time.time(), file_path),
+        )
         con.commit()
 
 
@@ -453,6 +565,226 @@ def get_persisted_roots(db_path: str) -> List[str]:
     return [r["path"] for r in rows]
 
 
+# ── Privacy denylist ─────────────────────────────────────────────────────────
+
+def _normalise_path(path: str) -> str:
+    return str(Path(path).expanduser().resolve())
+
+
+def add_deny_path(db_path: str, path: str, *, reason: str = "") -> bool:
+    """Persist a do-not-read path. Applies to the path and every child path."""
+    denied = _normalise_path(path)
+    with _conn(db_path) as con:
+        existing = con.execute("SELECT path FROM path_denylist WHERE path = ?", (denied,)).fetchone()
+        if existing:
+            return False
+        con.execute(
+            "INSERT INTO path_denylist (path, reason, added_at) VALUES (?, ?, ?)",
+            (denied, reason or "", time.time()),
+        )
+        con.commit()
+    return True
+
+
+def remove_deny_path(db_path: str, path: str) -> bool:
+    denied = _normalise_path(path)
+    with _conn(db_path) as con:
+        rows = con.execute("DELETE FROM path_denylist WHERE path = ? RETURNING path", (denied,)).fetchall()
+        con.commit()
+    return len(rows) > 0
+
+
+def list_deny_paths(db_path: str) -> List[Dict[str, Any]]:
+    with _conn(db_path) as con:
+        rows = con.execute("SELECT path, reason, added_at FROM path_denylist ORDER BY added_at").fetchall()
+    return [dict(r) for r in rows]
+
+
+_PLAIN_LANGUAGE_EXPLANATION = (
+    "SHAIL can help answer questions about files you choose, like PDFs, notes, "
+    "spreadsheets, and project folders. It does not need your whole computer. "
+    "SHAIL keeps a local index of file names, basic details, and short searchable "
+    "snippets so it can find relevant files later. When you ask a question, SHAIL "
+    "may read matching files from folders you approved to build an answer. You can "
+    "remove folders or block private folders any time."
+)
+
+
+def recommended_roots() -> List[Dict[str, str]]:
+    home = Path.home()
+    candidates = [
+        (home / "Documents", "Documents", "Common place for notes, PDFs, and project files"),
+        (home / "Desktop", "Desktop", "Often contains active work"),
+        (home / "Downloads", "Downloads", "Often contains recent files"),
+        (home / "Projects", "Projects", "Common place for project folders"),
+        (home / "Code", "Code", "Common place for source code and technical notes"),
+    ]
+    return [
+        {"path": str(path), "label": label, "reason": reason}
+        for path, label, reason in candidates
+        if path.exists() and path.is_dir()
+    ]
+
+
+def get_onboarding_state(db_path: str) -> Dict[str, Any]:
+    with _conn(db_path) as con:
+        row = con.execute("SELECT * FROM path_onboarding WHERE id = 1").fetchone()
+    selected = json.loads(row["selected_roots_json"] or "[]") if row else []
+    denied = json.loads(row["denied_paths_json"] or "[]") if row else []
+    completed = bool(row["completed"]) if row else False
+    active = get_active_scan_roots(db_path, include_defaults=completed)
+    return {
+        "completed": completed,
+        "completed_at": row["completed_at"] if row else None,
+        "selected_roots": selected,
+        "denied_paths": denied,
+        "scan_mode": row["scan_mode"] if row else "manual_approved_roots_only",
+        "acknowledged": bool(row["acknowledged"]) if row else False,
+        "skipped": bool(row["skipped"]) if row else False,
+        "recommended_roots": recommended_roots(),
+        "active_roots": active,
+        "plain_language_explanation": _PLAIN_LANGUAGE_EXPLANATION,
+    }
+
+
+def onboarding_completed(db_path: str) -> bool:
+    return bool(get_onboarding_state(db_path)["completed"])
+
+
+def complete_onboarding(
+    db_path: str,
+    *,
+    approved_roots: List[str],
+    denied_paths: Optional[List[str]] = None,
+    acknowledged: bool,
+    skipped: bool = False,
+    scan_mode: str = "manual_approved_roots_only",
+) -> Dict[str, Any]:
+    if not acknowledged:
+        raise ValueError("acknowledged=true is required to complete local file onboarding")
+
+    selected: List[str] = []
+    for path in approved_roots:
+        p = Path(path).expanduser()
+        if p.is_dir() and add_root(db_path, str(p)):
+            selected.append(str(p.resolve()))
+        elif p.is_dir():
+            selected.append(str(p.resolve()))
+
+    denied: List[str] = []
+    for path in denied_paths or []:
+        p = Path(path).expanduser()
+        add_deny_path(db_path, str(p), reason="user_onboarding")
+        denied.append(_normalise_path(str(p)))
+
+    now = time.time()
+    with _conn(db_path) as con:
+        con.execute(
+            """
+            UPDATE path_onboarding
+            SET completed = 1,
+                completed_at = ?,
+                selected_roots_json = ?,
+                denied_paths_json = ?,
+                scan_mode = ?,
+                acknowledged = 1,
+                skipped = ?,
+                updated_at = ?
+            WHERE id = 1
+            """,
+            (
+                now,
+                json.dumps(selected),
+                json.dumps(denied),
+                scan_mode,
+                1 if skipped else 0,
+                now,
+            ),
+        )
+        con.commit()
+    return get_onboarding_state(db_path)
+
+
+def reset_onboarding(db_path: str) -> Dict[str, Any]:
+    now = time.time()
+    with _conn(db_path) as con:
+        con.execute(
+            """
+            UPDATE path_onboarding
+            SET completed = 0,
+                completed_at = NULL,
+                selected_roots_json = '[]',
+                denied_paths_json = '[]',
+                scan_mode = 'manual_approved_roots_only',
+                acknowledged = 0,
+                skipped = 0,
+                updated_at = ?
+            WHERE id = 1
+            """,
+            (now,),
+        )
+        con.commit()
+    return get_onboarding_state(db_path)
+
+
+def get_active_scan_roots(
+    db_path: str,
+    *,
+    env_roots: Optional[List[str]] = None,
+    include_defaults: Optional[bool] = None,
+) -> List[str]:
+    env = [str(Path(r).expanduser().resolve()) for r in (env_roots or []) if r and Path(r).expanduser().is_dir()]
+    persisted = get_persisted_roots(db_path)
+    if include_defaults is None:
+        include_defaults = onboarding_completed(db_path)
+    defaults = _default_roots() if include_defaults else []
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for r in env + persisted + defaults:
+        try:
+            resolved = str(Path(r).expanduser().resolve())
+        except Exception:
+            continue
+        if resolved in seen or not Path(resolved).is_dir():
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    return out
+
+
+def is_denied(db_path: str, path: str) -> bool:
+    """True when path is exactly denied or inside a denied directory."""
+    return _is_denied_against(path, _resolved_deny_paths(db_path))
+
+
+def _resolved_deny_paths(db_path: str) -> List[Path]:
+    out: List[Path] = []
+    for row in list_deny_paths(db_path):
+        try:
+            out.append(Path(row["path"]).expanduser().resolve())
+        except Exception:
+            continue
+    return out
+
+
+def _is_denied_against(path: str, denied_paths: Iterable[Path]) -> bool:
+    try:
+        candidate = Path(path).expanduser().resolve()
+    except Exception:
+        return True
+    for denied in denied_paths:
+        if candidate == denied:
+            return True
+        try:
+            if candidate.is_relative_to(denied):
+                return True
+        except AttributeError:
+            if str(candidate).startswith(str(denied).rstrip(os.sep) + os.sep):
+                return True
+    return False
+
+
 def _update_root_stats(db_path: str, path: str, file_count: int) -> None:
     with _conn(db_path) as con:
         con.execute(
@@ -470,10 +802,13 @@ def scan(db_path: str, roots: Optional[List[str]] = None) -> int:
     of files indexed. Skips files that haven't changed (mtime unchanged).
     Folders are always upserted (cheap; needed for tree view).
     """
-    scan_roots = [Path(r) for r in roots] if roots else [Path(r) for r in _default_roots()]
-    if not scan_roots:
+    scan_roots = [Path(r) for r in roots] if roots is not None else [Path(r) for r in _default_roots()]
+    if roots is None and not scan_roots:
         scan_roots = list(_SCAN_ROOTS)
     count = 0
+    seen_paths: set[str] = set()
+    unchanged_paths: List[str] = []
+    denied_paths = _resolved_deny_paths(db_path)
 
     with _conn(db_path) as con:
         existing: Dict[str, float] = {
@@ -484,18 +819,24 @@ def scan(db_path: str, roots: Optional[List[str]] = None) -> int:
     for root in scan_roots:
         if not root.exists() or not root.is_dir():
             continue
+        if _is_denied_against(str(root), denied_paths):
+            continue
         # Register root folder so tree queries have a starting node.
         upsert_folder(db_path, str(root))
+        seen_paths.add(str(root))
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             # Prune junk dirs + hidden dirs.
             dirnames[:] = [d for d in dirnames
-                           if not d.startswith(".") and d not in _SKIP_DIRS]
+                           if not d.startswith(".")
+                           and d not in _SKIP_DIRS
+                           and not _is_denied_against(str(Path(dirpath) / d), denied_paths)]
             # Folder rows for every visited dir.
             try:
                 child_count = len(dirnames) + sum(
                     1 for f in filenames if Path(f).suffix.lower() in _INCLUDE_EXTS
                 )
                 upsert_folder(db_path, dirpath, child_count=child_count)
+                seen_paths.add(str(Path(dirpath)))
             except OSError:
                 pass
 
@@ -505,16 +846,73 @@ def scan(db_path: str, roots: Optional[List[str]] = None) -> int:
                 fpath = Path(dirpath) / fname
                 if fpath.suffix.lower() not in _INCLUDE_EXTS:
                     continue
+                if _is_denied_against(str(fpath), denied_paths):
+                    continue
                 try:
                     mtime = fpath.stat().st_mtime
                 except OSError:
                     continue
                 if str(fpath) in existing and existing[str(fpath)] == mtime:
+                    seen_paths.add(str(fpath))
+                    unchanged_paths.append(str(fpath))
                     continue
                 if upsert_file(db_path, str(fpath)):
+                    seen_paths.add(str(fpath))
                     count += 1
 
+    _mark_seen_files(db_path, unchanged_paths)
+
+    if roots:
+        _mark_missing_under_roots(db_path, [str(Path(r)) for r in roots], seen_paths)
+
     return count
+
+
+def _mark_seen_files(db_path: str, paths: List[str]) -> None:
+    if not paths:
+        return
+    now = time.time()
+    with _conn(db_path) as con:
+        con.executemany(
+            "UPDATE path_index SET last_seen_at = ?, deleted_at = NULL, "
+            "last_scan_status = 'present' WHERE path = ?",
+            [(now, path) for path in paths],
+        )
+        con.commit()
+
+
+def _mark_missing_under_roots(db_path: str, roots: List[str], seen_paths: set[str]) -> None:
+    now = time.time()
+    resolved_roots = []
+    for r in roots:
+        try:
+            resolved_roots.append(Path(r).expanduser().resolve())
+        except Exception:
+            continue
+    if not resolved_roots:
+        return
+    with _conn(db_path) as con:
+        rows = con.execute(
+            "SELECT path FROM path_index WHERE deleted_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            path = row["path"]
+            if path in seen_paths:
+                continue
+            try:
+                candidate = Path(path).expanduser().resolve()
+            except Exception:
+                continue
+            under_root = any(
+                candidate == root or candidate.is_relative_to(root)
+                for root in resolved_roots
+            )
+            if under_root:
+                con.execute(
+                    "UPDATE path_index SET deleted_at = ?, last_scan_status = 'deleted' WHERE path = ?",
+                    (now, path),
+                )
+        con.commit()
 
 
 def backfill_snippets(db_path: str, *, max_files: int = 2000,
@@ -612,10 +1010,11 @@ def search(db_path: str, query: str, limit: int = 20) -> List[Dict[str, Any]]:
     if not terms:
         with _conn(db_path) as con:
             rows = con.execute(
-                "SELECT * FROM path_index WHERE is_dir = 0 ORDER BY mtime DESC LIMIT ?",
+                "SELECT * FROM path_index WHERE is_dir = 0 AND deleted_at IS NULL "
+                "ORDER BY mtime DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in rows if not is_denied(db_path, r["path"])]
 
     with _conn(db_path) as con:
         # FTS5 path — try first
@@ -625,12 +1024,12 @@ def search(db_path: str, query: str, limit: int = 20) -> List[Dict[str, Any]]:
             rows = con.execute(
                 "SELECT p.* FROM path_index p "
                 "JOIN path_index_fts f ON f.id = p.id "
-                "WHERE path_index_fts MATCH ? AND p.is_dir = 0 "
+                "WHERE path_index_fts MATCH ? AND p.is_dir = 0 AND p.deleted_at IS NULL "
                 "ORDER BY bm25(path_index_fts) LIMIT ?",
                 (fts_q, limit),
             ).fetchall()
             if rows:
-                return [dict(r) for r in rows]
+                return [dict(r) for r in rows if not is_denied(db_path, r["path"])]
         except sqlite3.OperationalError:
             pass
         # LIKE fallback
@@ -644,10 +1043,11 @@ def search(db_path: str, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         params.append(limit)
         rows = con.execute(
             f"SELECT * FROM path_index WHERE is_dir = 0 AND ({like_clauses}) "
+            f"AND deleted_at IS NULL "
             f"ORDER BY mtime DESC LIMIT ?",
             params,
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows if not is_denied(db_path, r["path"])]
 
 
 def tree(
@@ -667,8 +1067,10 @@ def tree(
     seen: set = set()
     with _conn(db_path) as con:
         if root:
+            if is_denied(db_path, root):
+                return {"root": root, "nodes": [], "edges": [], "truncated": False}
             base = con.execute(
-                "SELECT * FROM path_index WHERE path = ?", (root,)
+                "SELECT * FROM path_index WHERE path = ? AND deleted_at IS NULL", (root,)
             ).fetchone()
             base_paths = [root] if base else []
             if base:
@@ -677,11 +1079,13 @@ def tree(
         else:
             base_rows = con.execute(
                 "SELECT * FROM path_index WHERE depth = "
-                "  (SELECT MIN(depth) FROM path_index WHERE is_dir = 1) "
-                "AND is_dir = 1 ORDER BY path LIMIT 50"
+                "  (SELECT MIN(depth) FROM path_index WHERE is_dir = 1 AND deleted_at IS NULL) "
+                "AND is_dir = 1 AND deleted_at IS NULL ORDER BY path LIMIT 50"
             ).fetchall()
             base_paths = [r["path"] for r in base_rows]
             for r in base_rows:
+                if is_denied(db_path, r["path"]):
+                    continue
                 if r["path"] not in seen:
                     nodes.append(_node_dict(r))
                     seen.add(r["path"])
@@ -694,11 +1098,13 @@ def tree(
             placeholders = ",".join("?" * len(frontier))
             rows = con.execute(
                 f"SELECT * FROM path_index WHERE parent_path IN ({placeholders}) "
-                f"ORDER BY is_dir DESC, path LIMIT ?",
+                f"AND deleted_at IS NULL ORDER BY is_dir DESC, path LIMIT ?",
                 (*frontier, max_nodes - len(nodes)),
             ).fetchall()
             next_frontier: List[str] = []
             for r in rows:
+                if is_denied(db_path, r["path"]):
+                    continue
                 if r["path"] in seen:
                     continue
                 nodes.append(_node_dict(r))
@@ -722,43 +1128,55 @@ def _node_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "mtime":       row["mtime"],
         "child_count": int(row["child_count"] or 0),
         "embedded":    bool(row["embedded"] or 0),
+        "deleted_at":  row["deleted_at"],
+        "content_hash": row["content_hash"],
     }
 
 
 def get_by_id(db_path: str, record_id: str) -> Optional[Dict[str, Any]]:
     with _conn(db_path) as con:
-        row = con.execute("SELECT * FROM path_index WHERE id = ?", (record_id,)).fetchone()
-    return dict(row) if row else None
+        row = con.execute(
+            "SELECT * FROM path_index WHERE id = ? AND deleted_at IS NULL",
+            (record_id,),
+        ).fetchone()
+    if not row or is_denied(db_path, row["path"]):
+        return None
+    return dict(row)
 
 
 def get_by_path(db_path: str, path: str) -> Optional[Dict[str, Any]]:
+    if is_denied(db_path, path):
+        return None
     with _conn(db_path) as con:
-        row = con.execute("SELECT * FROM path_index WHERE path = ?", (path,)).fetchone()
+        row = con.execute(
+            "SELECT * FROM path_index WHERE path = ? AND deleted_at IS NULL",
+            (path,),
+        ).fetchone()
     return dict(row) if row else None
 
 
 def stats(db_path: str) -> Dict[str, Any]:
     with _conn(db_path) as con:
         total_files = con.execute(
-            "SELECT COUNT(*) FROM path_index WHERE is_dir = 0").fetchone()[0]
+            "SELECT COUNT(*) FROM path_index WHERE is_dir = 0 AND deleted_at IS NULL").fetchone()[0]
         total_dirs = con.execute(
-            "SELECT COUNT(*) FROM path_index WHERE is_dir = 1").fetchone()[0]
+            "SELECT COUNT(*) FROM path_index WHERE is_dir = 1 AND deleted_at IS NULL").fetchone()[0]
         by_type = {
             row[0]: row[1]
             for row in con.execute(
-                "SELECT file_type, COUNT(*) FROM path_index WHERE is_dir = 0 "
+                "SELECT file_type, COUNT(*) FROM path_index WHERE is_dir = 0 AND deleted_at IS NULL "
                 "GROUP BY file_type ORDER BY 2 DESC"
             )
         }
         by_kind = {
             row[0] or "other": row[1]
             for row in con.execute(
-                "SELECT kind, COUNT(*) FROM path_index WHERE is_dir = 0 "
+                "SELECT kind, COUNT(*) FROM path_index WHERE is_dir = 0 AND deleted_at IS NULL "
                 "GROUP BY kind ORDER BY 2 DESC"
             )
         }
         embedded_count = con.execute(
-            "SELECT COUNT(*) FROM path_index WHERE embedded = 1").fetchone()[0]
+            "SELECT COUNT(*) FROM path_index WHERE embedded = 1 AND deleted_at IS NULL").fetchone()[0]
         last_indexed = con.execute(
             "SELECT MAX(indexed_at) FROM path_index").fetchone()[0]
     return {

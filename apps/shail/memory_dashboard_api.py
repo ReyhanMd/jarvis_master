@@ -26,10 +26,15 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from apps.shail.auth_api import get_current_user
-from apps.shail.memory_delete import delete_memory_everywhere
+from apps.shail.memory_delete import collect_memory_delete_ids, delete_memory_everywhere
 from apps.shail.source_normalization import (
     is_browser_memory,
     normalize_browser_metadata,
+)
+from apps.shail.browser_memory_model import (
+    list_records as list_browser_memory_records,
+    search_records as search_browser_memory_records,
+    visible_namespaces as browser_visible_namespaces,
 )
 from shail.memory.rag import _get_store
 
@@ -152,71 +157,38 @@ def _parse_tags(raw) -> list:
 
 
 def _visible_namespaces(user_id: str) -> list[str]:
-    """Single-user mode: only the canonical namespace. No anonymous fallbacks."""
-    return [_namespace(user_id)]
+    """Browser/dashboard surfaces include legacy anonymous captures."""
+    return browser_visible_namespaces(_namespace(user_id))
 
 
 
 def _get_all_user_records(user_id: str):
-    """
-    Return all records from ChromaDB visible to this user.
-    Single-user mode: queries only the canonical user namespace.
-    Returns list of (id, document, metadata) tuples, deduplicated by id.
-    """
-    store = _get_store()
-    if not hasattr(store, "collection"):
-        return []
-
-    namespace = _namespace(user_id)
-    all_records: list = []
-    seen: set = set()
-
-    try:
-        result = store.collection.get(
-            where={"namespace": namespace},
-            include=["documents", "metadatas"],
-            limit=5000,
-        )
-    except Exception as exc:
-        logger.warning("Failed to fetch records for namespace %s: %s", namespace, exc)
-        return []
-
-    ids   = result.get("ids", [])
-    docs  = result.get("documents", []) or [""] * len(ids)
-    metas = result.get("metadatas", []) or [{}] * len(ids)
-    for rid, doc, meta in zip(ids, docs, metas):
-        meta = meta or {}
-        if not is_browser_memory(meta, doc or ""):
-            continue
-        meta = normalize_browser_metadata(meta, doc or "")
-        logical_id = meta.get("customId") or meta.get("parent_memory_id") or meta.get("id") or rid
-        if logical_id not in seen:
-            seen.add(logical_id)
-            all_records.append((logical_id, doc, meta))
-
-    try:
-        from apps.shail import raw_transcripts as _rt
-        for raw in _rt.list_recent(namespace=namespace, limit=5000):
-            raw_id = raw.get("memory_id")
-            if not raw_id or raw_id in seen:
-                continue
-            content = raw.get("content") or ""
-            meta = raw.get("metadata") or {}
-            if not is_browser_memory(meta, content):
-                continue
-            meta = normalize_browser_metadata(meta, content)
-            meta.setdefault("customId", raw_id)
-            meta.setdefault("id", raw_id)
-            meta.setdefault("eventType", raw.get("content_type", "page_visit"))
-            meta.setdefault("timestamp", raw.get("captured_at"))
-            if raw.get("embedded") == 0:
-                meta.setdefault("state", "indexing")
-            seen.add(raw_id)
-            all_records.append((raw_id, content, meta))
-    except Exception as exc:
-        logger.warning("Failed to merge raw transcript records for dashboard: %s", exc)
-
-    return all_records
+    """Return canonical browser-memory records as dashboard-compatible tuples."""
+    out = []
+    for record in list_browser_memory_records(_visible_namespaces(user_id), limit=5000):
+        meta = dict(record.metadata or {})
+        meta.update({
+            "customId": record.customId,
+            "eventType": record.eventType,
+            "sourceApp": record.sourceApp,
+            "sourceUrl": record.sourceUrl,
+            "title": record.title,
+            "summary": record.summary,
+            "timestamp": record.timestamp,
+            "tags": json.dumps(record.tags),
+            "pinned": "true" if record.pinned else "false",
+            "state": record.state,
+            "fidelity": record.fidelity,
+            "confidence": record.confidence,
+            "parentId": record.parentId,
+            "version": record.version,
+            "conversationId": record.conversationId,
+            "capture_source": record.captureSource,
+            "capture_mode": record.captureMode,
+            "namespace": record.namespace,
+        })
+        out.append((record.id, record.content, meta))
+    return out
 
 
 def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = False) -> MemoryItem:
@@ -253,6 +225,10 @@ def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = Fals
         version = int(meta.get("version", 1))
     except Exception:
         version = 1
+    try:
+        score = float(meta.get("score")) if meta.get("score") is not None else None
+    except Exception:
+        score = None
 
     return MemoryItem(
         id=rid,
@@ -265,6 +241,7 @@ def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = Fals
         timestamp=meta.get("timestamp", datetime.now(timezone.utc).isoformat()),
         tags=_parse_tags(meta.get("tags")),
         pinned=meta.get("pinned", "false") == "true",
+        score=score,
         content=doc if include_content else None,
         confidence=confidence,
         state=state,
@@ -300,12 +277,44 @@ async def list_memories(
     `browser_chatgpt`) and the legacy `sourceApp` field.
     `tier` filters by ephemeral|important.
     """
-    records = _get_all_user_records(user_id)
+    import asyncio
+    if q:
+        canonical = await asyncio.to_thread(
+            search_browser_memory_records,
+            _visible_namespaces(user_id),
+            query=q,
+            k=5000,
+            source_app=source.lower() if source else None,
+        )
+        records = []
+        for record in canonical:
+            meta = dict(record.metadata or {})
+            meta.update({
+                "customId": record.customId,
+                "eventType": record.eventType,
+                "sourceApp": record.sourceApp,
+                "sourceUrl": record.sourceUrl,
+                "title": record.title,
+                "summary": record.summary,
+                "timestamp": record.timestamp,
+                "tags": json.dumps(record.tags),
+                "pinned": "true" if record.pinned else "false",
+                "state": record.state,
+                "fidelity": record.fidelity,
+                "confidence": record.confidence,
+                "parentId": record.parentId,
+                "version": record.version,
+                "score": record.score,
+            })
+            records.append((record.id, record.content, meta))
+    else:
+        import asyncio
+        records = await asyncio.to_thread(_get_all_user_records, user_id)
 
     # Apply tier + source filters at the metadata level before mapping.
     if tier:
         records = [(rid, doc, meta) for rid, doc, meta in records if (meta or {}).get("tier") == tier]
-    if source:
+    if source and not q:
         source_norm = source.lower()
         records = [
             (rid, doc, meta) for rid, doc, meta in records
@@ -317,18 +326,13 @@ async def list_memories(
 
     items = [_record_to_item(rid, doc, meta) for rid, doc, meta in records]
 
-    # Filter
-    if q:
-        q_lower = q.lower()
-        items = [
-            it for it in items
-            if q_lower in it.title.lower() or q_lower in it.summary.lower()
-        ]
     if pinned is not None:
         items = [it for it in items if it.pinned == pinned]
 
-    # Sort newest first
-    items.sort(key=lambda x: x.timestamp, reverse=True)
+    if q:
+        items.sort(key=lambda x: x.score or 0.0, reverse=True)
+    else:
+        items.sort(key=lambda x: x.timestamp, reverse=True)
 
     total = len(items)
     pages = max(1, (total + limit - 1) // limit)
@@ -344,39 +348,11 @@ async def get_memory(
     user_id: str = Depends(get_current_user),
 ) -> MemoryItem:
     """Fetch full content of a single memory."""
-    store = _get_store()
-    if not hasattr(store, "collection"):
+    from apps.shail.browser_memory_model import get_record
+    record = get_record(memory_id, _visible_namespaces(user_id))
+    if not record:
         raise HTTPException(status_code=404, detail="Memory not found")
-
-    namespace = _namespace(user_id)
-    try:
-        result = store.collection.get(
-            ids=[memory_id],
-            where={"namespace": namespace},
-            include=["documents", "metadatas"],
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    ids  = result.get("ids", [])
-    docs = result.get("documents", [])
-    metas = result.get("metadatas", [])
-
-    if not ids:
-        try:
-            from apps.shail import raw_transcripts as _rt
-            raw = _rt.get(memory_id)
-            if raw and raw.get("namespace") == namespace and is_browser_memory(raw.get("metadata") or {}, raw.get("content") or ""):
-                return _record_to_item(memory_id, raw.get("content") or "", raw.get("metadata") or {}, include_content=True)
-        except Exception as exc:
-            logger.warning("Raw transcript detail fallback failed for %s: %s", memory_id, exc)
-        raise HTTPException(status_code=404, detail="Memory not found")
-
-    meta = metas[0] or {}
-    doc = docs[0] or ""
-    if not is_browser_memory(meta, doc):
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return _record_to_item(ids[0], doc, meta, include_content=True)
+    return MemoryItem(**record.to_dashboard_item(include_content=True))
 
 
 @dashboard_router.get("/memories/{memory_id}/related", response_model=List[MemoryItem])
@@ -391,7 +367,8 @@ async def related_memories(
     Falls back to same sourceApp + closest-by-time if nothing else hits.
     Excludes the source memory itself.
     """
-    records = _get_all_user_records(user_id)
+    import asyncio
+    records = await asyncio.to_thread(_get_all_user_records, user_id)
     target = next(((rid, doc, meta) for rid, doc, meta in records if rid == memory_id), None)
     if not target:
         raise HTTPException(status_code=404, detail="Memory not found")
@@ -491,18 +468,37 @@ async def patch_memory(
         meta["tags"] = json.dumps(req.tags)
 
     try:
-        store.collection.update(ids=[memory_id], metadatas=[meta])
+        logical_id, update_ids = collect_memory_delete_ids(store, memory_id, _visible_namespaces(user_id))
+        ids_to_update = sorted(update_ids or {memory_id})
+        metas_to_update = []
+        if len(ids_to_update) == 1:
+            metas_to_update = [meta]
+        else:
+            chunk_result = store.collection.get(ids=ids_to_update, include=["metadatas"])
+            for old_meta in chunk_result.get("metadatas", []) or []:
+                updated = dict(old_meta or {})
+                if req.pinned is not None:
+                    updated["pinned"] = "true" if req.pinned else "false"
+                if req.tags is not None:
+                    updated["tags"] = json.dumps(req.tags)
+                metas_to_update.append(updated)
+        store.collection.update(ids=ids_to_update, metadatas=metas_to_update)
         try:
             from apps.shail import raw_transcripts as _rt
-            raw = _rt.get(memory_id)
+            raw = _rt.get(logical_id)
             if raw and raw.get("namespace") == namespace:
+                raw_meta = normalize_browser_metadata(raw.get("metadata") or {}, raw.get("content") or "")
+                if req.pinned is not None:
+                    raw_meta["pinned"] = "true" if req.pinned else "false"
+                if req.tags is not None:
+                    raw_meta["tags"] = json.dumps(req.tags)
                 _rt.save(
-                    memory_id=memory_id,
+                    memory_id=logical_id,
                     user_id=user_id,
                     namespace=namespace,
                     content_type=raw.get("content_type", meta.get("eventType", "page_visit")),
                     content=raw.get("content") or "",
-                    metadata=meta,
+                    metadata=raw_meta,
                     capture_mode=raw.get("capture_mode") or "active",
                 )
         except Exception as raw_exc:
@@ -539,6 +535,17 @@ async def delete_memory(
             if not raw or raw.get("namespace") not in _visible_namespaces(user_id):
                 raise HTTPException(status_code=404, detail="Memory not found")
             _rt.delete(memory_id)
+            try:
+                from apps.shail.blueprints import delete_blueprint
+                from apps.shail.pipeline_status import delete_status
+                from apps.shail.blueprint_queue import delete_jobs_for_memory
+                from apps.shail.capture_store import delete_memory_state
+                delete_blueprint(memory_id)
+                delete_status(memory_id)
+                delete_jobs_for_memory(memory_id)
+                delete_memory_state(memory_id)
+            except Exception as cleanup_exc:
+                logger.warning("raw-only dashboard delete cleanup failed for %s: %s", memory_id, cleanup_exc)
             logical_id = memory_id
             deleted_ids = [memory_id]
         except HTTPException:
@@ -587,6 +594,17 @@ async def bulk_delete(
             raw = _rt.get(memory_id)
             if raw and raw.get("namespace") in _visible_namespaces(user_id):
                 _rt.delete(memory_id)
+                try:
+                    from apps.shail.blueprints import delete_blueprint
+                    from apps.shail.pipeline_status import delete_status
+                    from apps.shail.blueprint_queue import delete_jobs_for_memory
+                    from apps.shail.capture_store import delete_memory_state
+                    delete_blueprint(memory_id)
+                    delete_status(memory_id)
+                    delete_jobs_for_memory(memory_id)
+                    delete_memory_state(memory_id)
+                except Exception:
+                    pass
                 deleted += 1
         except Exception:
             pass
@@ -610,7 +628,8 @@ async def get_stats(
     user_id: str = Depends(get_current_user),
 ) -> DashboardStats:
     """Compute aggregate stats for the dashboard overview."""
-    records = _get_all_user_records(user_id)
+    import asyncio
+    records = await asyncio.to_thread(_get_all_user_records, user_id)
     total = len(records)
 
     now = datetime.now(timezone.utc)
@@ -672,7 +691,8 @@ async def export_memories(
     user_id: str = Depends(get_current_user),
 ) -> Response:
     """Export all user memories as JSON or Markdown."""
-    records = _get_all_user_records(user_id)
+    import asyncio
+    records = await asyncio.to_thread(_get_all_user_records, user_id)
     items = [_record_to_item(rid, doc, meta, include_content=True) for rid, doc, meta in records]
     items.sort(key=lambda x: x.timestamp, reverse=True)
 
@@ -708,25 +728,38 @@ async def export_memories(
 
 # ── Memory Graph ───────────────────────────────────────────────────────────────
 
-class GraphNode(BaseModel):
+class GraphApiMemory(BaseModel):
     id: str
-    label: str
-    type: str
-    sourceApp: str
-    timestamp: str
-    importance: float = 0.5
+    memory: str
+    content: Optional[str] = None
+    isStatic: bool = False
+    spaceId: str = ""
+    isLatest: bool = True
+    isForgotten: bool = False
+    forgetAfter: Optional[str] = None
+    forgetReason: Optional[str] = None
+    version: int = 1
+    parentMemoryId: Optional[str] = None
+    rootMemoryId: Optional[str] = None
+    createdAt: str
+    updatedAt: str
+    relation: Optional[Dict[str, str]] = None
+    updatesMemoryId: Optional[str] = None
+    nextVersionId: Optional[str] = None
+    memoryRelations: Optional[Dict[str, str]] = None
+    spaceContainerTag: Optional[str] = None
 
-
-class GraphEdge(BaseModel):
-    source: str
-    target: str
-    type: str = "same_day"          # conversation|same_url|shared_domain|shared_tags|same_app_day|token_overlap
-    weight: float = 0.3             # 0.0 – 1.0, used for visual thickness
-
+class GraphApiDocument(BaseModel):
+    id: str
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    documentType: str
+    createdAt: str
+    updatedAt: str
+    memories: List[GraphApiMemory]
 
 class MemoryGraph(BaseModel):
-    nodes: List[GraphNode]
-    edges: List[GraphEdge]
+    documents: List[GraphApiDocument]
 
 
 @dashboard_router.get("/graph", response_model=MemoryGraph)
@@ -749,138 +782,56 @@ async def memory_graph(
     differently. Multiple edge types between the same pair are collapsed into
     one edge (highest weight wins).
     """
-    records = _get_all_user_records(user_id)
+    import asyncio
+    records = await asyncio.to_thread(_get_all_user_records, user_id)
 
     nodes: List[GraphNode] = []
     edges: List[GraphEdge] = []
 
-    # Index structures for fast link discovery
-    conv_to_ids: dict[str, list[str]] = defaultdict(list)
-    url_to_ids: dict[str, list[str]] = defaultdict(list)
-    domain_to_ids: dict[str, list[str]] = defaultdict(list)
-    day_app_to_ids: dict[str, list[str]] = defaultdict(list)
-    tag_to_ids: dict[str, list[str]] = defaultdict(list)
+    docs_by_id: Dict[str, GraphApiDocument] = {}
 
-    # For token-overlap linkage
-    rid_tokens: dict[str, set[str]] = {}
-    STOP = {"the", "a", "an", "of", "to", "in", "is", "and", "for", "on",
-            "at", "it", "as", "be", "by", "or", "this", "that", "with",
-            "from", "was", "are", "has", "have", "had", "not", "but", "web"}
-
-    for rid, _doc, meta in records:
+    for rid, doc, meta in records:
         meta = meta or {}
-        ts    = meta.get("timestamp", datetime.now(timezone.utc).isoformat())
-        label = meta.get("title") or meta.get("sourceUrl", rid)[:60]
-        importance = float(meta.get("importance_score", 0.5))
-
-        nodes.append(GraphNode(
-            id=rid,
-            label=label,
-            type=meta.get("eventType", "page_visit"),
-            sourceApp=meta.get("sourceApp", "web"),
-            timestamp=ts,
-            importance=importance,
-        ))
-
-        conv = meta.get("conversationId") or meta.get("sessionId")
-        if conv:
-            conv_to_ids[conv].append(rid)
-
+        ts = meta.get("timestamp", datetime.now(timezone.utc).isoformat())
         url = meta.get("sourceUrl", "")
-        if url and len(url) > 8:
-            url_to_ids[url].append(rid)
-            domain = _extract_domain(url)
-            if domain:
-                domain_to_ids[domain].append(rid)
+        conv = meta.get("conversationId") or meta.get("sessionId") or ""
 
-        day = ts[:10]
-        app = meta.get("sourceApp", "web")
-        if day and app:
-            day_app_to_ids[f"{day}::{app}"].append(rid)
+        doc_id = url if url else (conv if conv else f"doc_{rid}")
+        if doc_id not in docs_by_id:
+            docs_by_id[doc_id] = GraphApiDocument(
+                id=doc_id,
+                title=meta.get("title") or url or "Untitled",
+                summary=None,
+                documentType=meta.get("sourceApp", "web"),
+                createdAt=ts,
+                updatedAt=ts,
+                memories=[]
+            )
 
-        raw_tags = _parse_tags(meta.get("tags"))
-        for tag in raw_tags:
-            t = tag.strip().lower()
-            if t:
-                tag_to_ids[t].append(rid)
+        mem = GraphApiMemory(
+            id=rid,
+            memory=meta.get("summary") or doc or "",
+            content=doc,
+            isStatic=False,
+            spaceId="",
+            isLatest=True,
+            isForgotten=bool(meta.get("isForgotten")),
+            forgetAfter=meta.get("forgetAfter"),
+            forgetReason=None,
+            version=int(meta.get("version", 1) or 1),
+            parentMemoryId=meta.get("parentId") or meta.get("parent_memory_id"),
+            rootMemoryId=None,
+            createdAt=ts,
+            updatedAt=ts,
+            relation=None,
+            updatesMemoryId=None,
+            nextVersionId=None,
+            memoryRelations=meta.get("memoryRelations") or {},
+            spaceContainerTag=None
+        )
+        docs_by_id[doc_id].memories.append(mem)
 
-        # token set for overlap scoring
-        text = f"{label} {meta.get('summary', '')}".lower()
-        tokens = {w for w in text.split() if len(w) > 3 and w not in STOP}
-        if tokens:
-            rid_tokens[rid] = tokens
-
-    # Build edge set (deduplicated by pair, best weight wins)
-    edge_map: dict[tuple[str, str], dict] = {}
-
-    def _add_edge(a: str, b: str, etype: str, weight: float) -> None:
-        key = (min(a, b), max(a, b))
-        if key not in edge_map or edge_map[key]["weight"] < weight:
-            edge_map[key] = {"type": etype, "weight": weight}
-
-    # 1. Conversation edges (weight 1.0)
-    for ids in conv_to_ids.values():
-        for i in range(len(ids)):
-            for j in range(i + 1, min(i + 6, len(ids))):
-                _add_edge(ids[i], ids[j], "conversation", 1.0)
-
-    # 2. Same URL (weight 0.95)
-    for ids in url_to_ids.values():
-        for i in range(len(ids)):
-            for j in range(i + 1, min(i + 8, len(ids))):
-                _add_edge(ids[i], ids[j], "same_url", 0.95)
-
-    # 3. Shared domain (weight 0.5) — cap per domain to avoid explosion
-    for ids in domain_to_ids.values():
-        # only link adjacent (sorted by time), max 6 per domain
-        bucket = ids[:8]
-        for i in range(len(bucket) - 1):
-            _add_edge(bucket[i], bucket[i + 1], "shared_domain", 0.5)
-
-    # 4. Shared tags (weight 0.7)
-    for tag_ids in tag_to_ids.values():
-        bucket = tag_ids[:10]
-        for i in range(len(bucket)):
-            for j in range(i + 1, len(bucket)):
-                _add_edge(bucket[i], bucket[j], "shared_tags", 0.7)
-
-    # 5. Same app+day (weight 0.3, cap at 5 per bucket)
-    for ids in day_app_to_ids.values():
-        bucket = ids[:6]
-        for i in range(len(bucket) - 1):
-            _add_edge(bucket[i], bucket[i + 1], "same_app_day", 0.3)
-
-    # 6. Token overlap (weight proportional to Jaccard similarity)
-    # Only compute for nodes that aren't already heavily connected
-    id_list = [r for r, _, _ in records if r in rid_tokens]
-    # Limit O(n²) to manageable size — process at most 200 most-recent nodes
-    id_list = id_list[:200]
-    for i in range(len(id_list)):
-        for j in range(i + 1, len(id_list)):
-            a, b = id_list[i], id_list[j]
-            key = (min(a, b), max(a, b))
-            if key in edge_map:
-                continue  # already linked by stronger signal
-            ta, tb = rid_tokens.get(a, set()), rid_tokens.get(b, set())
-            if not ta or not tb:
-                continue
-            inter = len(ta & tb)
-            if inter < 2:
-                continue
-            jaccard = inter / len(ta | tb)
-            if jaccard >= 0.15:
-                _add_edge(a, b, "token_overlap", round(jaccard * 0.6, 3))
-
-    # Materialise edges
-    for (src, tgt), props in edge_map.items():
-        edges.append(GraphEdge(
-            source=src,
-            target=tgt,
-            type=props.get("type", "same_day"),
-            weight=props.get("weight", 0.3),
-        ))
-
-    return MemoryGraph(nodes=nodes, edges=edges)
+    return MemoryGraph(documents=list(docs_by_id.values()))
 
 
 

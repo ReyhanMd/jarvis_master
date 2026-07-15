@@ -31,6 +31,9 @@ from apps.shail.auth_store import create_api_key, create_user, get_user_by_api_k
 from apps.shail.auth_api import assert_canonical_email
 
 google_auth_router = APIRouter()
+GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE = (
+    "Google OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -92,9 +95,9 @@ async def google_start(request: Request, state: str = ""):
     Begin Google OAuth2 flow.
     The macOS app generates a UUID state and passes it here so it can poll /token.
     """
-    if not GOOGLE_CLIENT_ID:
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         return HTMLResponse(
-            "<h2>Google OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET</h2>",
+            f"<h2>{GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE}</h2>",
             status_code=503,
         )
     # Use caller-supplied state (preferred) or generate one
